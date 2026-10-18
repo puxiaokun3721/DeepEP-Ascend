@@ -123,7 +123,7 @@ timeout 300s torchrun --standalone --nproc_per_node=2 tests/afd/run_a5_single_ro
 | ep/dispatch.hpp SIMT histogram与路由 | 固定tile两遍统计/发射；直接使用common/simt.hpp deduplicate，保留最高lane代表语义 |
 | TokenLayout及metadata搬运 | AFD布局增加轮内token/mask；复用原生 preload_metadata/batch_idx/stage_idx 命名及双stage预加载/回填，每stage处理4个token，保留SF连续搬运及NDDMA分支 |
 | tile prefix | 各核并行处理独立rank/expert列，汇合后生成有序expert base；不增加scratch |
-| HcommJetty/HcommPeer | 每核预加载peer信息；复用原生build_write_sqe、SQ wrap、head及CQ处理；一条record用hidden/metadata两SGE、两WQEBB的SQE，至多32个SQE批量doorbell后drain，尾批显式提交 |
+| HcommJetty/HcommPeer | 每核预加载peer信息；payload复用原生combine的warp-per-WQE直接写SQ逻辑，每VF最多8条；一条record用hidden/metadata两SGE、两WQEBB。保留每WR强序/fence/CQE和至多32条doorbell后drain；控制表仍走原生build_write_sqe，尾批显式提交 |
 | HCCLContext | 复用初始化/注册/channel；AFD路径允许不等大peer buffer，原EP默认约束保留 |
 | EP JIT与pybind | 增加AFD kernel key/owner/public导出，原EP入口保留 |
 
@@ -132,3 +132,5 @@ metadata stage沿用MTE2→S就绪和MTE3→MTE2复用保护，最后一次relea
 原生六组token-pair合并到一个SQE的实现尚未恢复：AFD record_stride带对齐间隙，且SIMT分配的目标slot不等于源token遍历顺序，直接拼接原生SGE会写错目标位置。当前保持一record两SGE；进一步合并需要有界slot排序/填洞方案。每SQE仍请求CQE，route/count/prefix传输及控制发布仍由core0执行；未增加完整hidden镜像、未恢复全rank collective。
 
 本轮联合CPU suite为27项（原sender10+recv15，再加2项复用回归测试）通过，13个Python文件AST检查通过；这些检查不执行C++设备核。新增单卡/双rank矩阵见 [测试说明](../../tests/afd/README.md)，均尚未上卡。A5 API重载、跨URMA/UBMEM可见性、队列完成、并发前进、故障域退出、图replay及性能均未验收。本说明不宣称完整CANNBot流程或生产准入通过。
+
+2026-10-18发送侧WQE批量构建的边界、同步与验证见 [发送侧优化记录](native_wqe_batching.md)。

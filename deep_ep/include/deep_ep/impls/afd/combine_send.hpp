@@ -191,7 +191,7 @@ __global__ __vector__ void combine_send_impl(
         jetty.jetty_info->num_wqebb_bytes==handle::kNumWQEBBBytes);
     handle::HcommPeer peer(ub->peer_infos,jetty_ptrs,source_peers[0].peer_idx);
     for(int a=1;a<NA;++a) {handle::HcommPeer preload_peer(ub->peer_infos+a,jetty_ptrs,source_peers[a].peer_idx);}
-    uint32_t inflight=0;
+    uint32_t inflight=0,num_task_tokens=0;
     if(begin<end) {
         issue_load(begin,0);
         for(uint32_t row=begin,t=0;row<end;row+=T,++t) {
@@ -202,10 +202,12 @@ __global__ __vector__ void combine_send_impl(
                 const auto md=ub->metadata[stage_idx][j];if(md[0]<0)continue;
                 const auto lane=lanes[md[0]];peer.peer_info=ub->peer_infos+lane.src_rank_idx;
                 const uint64_t offset=return_lanes[md[0]].return_offset+(uint64_t(md[1])*K+md[2])*directory.return_stride;
-                put_at_offset<Timeout>(jetty,peer,offset,x+uint64_t(row+j)*H,2*uint64_t(H),inflight);
+                append_write_task<1,Timeout>(jetty,peer,offset,x+uint64_t(row+j)*H,nullptr,
+                    2*H,0,num_task_tokens,inflight);
             }
         }
     }
+    issue_write_task<1,Timeout>(jetty,num_task_tokens,inflight);
     flush_writes<Timeout>(jetty,inflight);recv_join();
     // Full independent snapshot precedes all ACKs. Nothing below reads Inbox.
     if(vec_core_idx==0) {

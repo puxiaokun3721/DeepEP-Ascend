@@ -137,42 +137,92 @@ __aicore__ inline void put_at_offset(handle::HcommJetty& jetty,const handle::Hco
     if(++inflight==kNumMaxPendingWrites) flush_writes<Timeout>(jetty,inflight);
 }
 
-// Native dispatch uses an SGE pair (hidden, metadata) for each token. Reuse
-// HcommJetty's header encoder and wrap-aware SQ copy, adding that second SGE.
-// Keep one record per SQE: AFD's align512 record gaps cannot be concatenated
-// like native dispatch's packed six-pair SQEs without extra padding SGEs.
-template<int64_t Timeout>
-__aicore__ inline void put_record_at_offset(handle::HcommJetty& jetty,const handle::HcommPeer& peer,
-    uint64_t offset,__gm__ void* x,__gm__ void* metadata_send_buffer,
-    uint32_t num_hidden_bytes,uint32_t num_metadata_bytes,uint32_t& inflight) {
-    constexpr uint32_t num_sges=2;
-    constexpr uint32_t num_wqebbs=(sizeof(AscendC::HcommUrmaSqeCtx)+
-        num_sges*sizeof(AscendC::HcommUrmaSgeCtx)+handle::kNumWQEBBBytes-1)/handle::kNumWQEBBBytes;
-    static_assert(num_wqebbs*handle::kNumWQEBBBytes<=512);
-    static_assert(kNumMaxPendingWrites*num_wqebbs<handle::kSQDepth);
-    EP_DEVICE_ASSERT(offset<=peer.peer_info->rmt_buffer_size &&
-        uint64_t(num_hidden_bytes)+num_metadata_bytes<=peer.peer_info->rmt_buffer_size-offset);
+// Upstream: ep/combine.hpp::load_meta_issue_wqe, one warp constructs one WQE.
+// AFD differences: explicit destination offsets, 1/2 SGEs, bounded tasks and
+// per-WR strong ordering/CQE retained from HcommJetty::build_write_sqe.
+// Descriptors overlay the existing 512B SQE scratch; no payload/HBM mirror.
+constexpr uint32_t kNumWritesPerTask=8;
+struct WriteTask {
+    uint64_t peer_info_addr,remote_offset,src_addr,metadata_addr;
+    uint32_t num_hidden_bytes,num_metadata_bytes;
+};
+static_assert(sizeof(WriteTask)*kNumWritesPerTask<=512);
+
+template<int kNumSGEs>
+__simt_vf__ __aicore__ __launch_bounds__(kNumWritesPerTask*warpSize)
+void issue_write_wqe(__ubuf__ const WriteTask* tasks,const uint64_t sq_base_addr,
+                     const uint32_t task_sqebb_idx,const uint32_t num_tokens) {
+    static_assert(kNumSGEs==1 || kNumSGEs==2);
+    static_assert(sizeof(AscendC::HcommUrmaSqeCtx)==48);
+    static_assert(sizeof(AscendC::HcommUrmaSgeCtx)==16);
+    constexpr uint32_t kNumWQEBBsPerToken=(48+16*kNumSGEs+63)/64;
+    constexpr uint32_t kNumWQEWords=kNumWQEBBsPerToken*8;
+    const auto thread_idx=static_cast<uint32_t>(threadIdx.x);
+    const auto token_idx=thread_idx/warpSize;
+    const auto lane_idx=thread_idx%warpSize;
+    if(token_idx<num_tokens && lane_idx<kNumWQEWords) {
+        const auto task=tasks[token_idx];
+        const auto peer_info_words=reinterpret_cast<__ubuf__ const uint64_t*>(task.peer_info_addr);
+        const auto token_sqebb_idx=task_sqebb_idx+token_idx*kNumWQEBBsPerToken;
+        uint64_t wqe_word=0;
+        if(lane_idx==0) {
+            wqe_word=handle::kWriteSQEHeaderTemplate|handle::kWriteSQEFinalFlags;
+            wqe_word|=static_cast<uint64_t>((token_sqebb_idx & handle::kSQDepth)==0)<<31;
+            wqe_word|=token_sqebb_idx & (handle::kSQDepth-1);
+        }
+        if(lane_idx>0 && lane_idx<6)wqe_word=peer_info_words[lane_idx-1];
+        if(lane_idx==1)wqe_word|=uint64_t(kNumSGEs)<<24;
+        if(lane_idx==5)wqe_word=peer_info_words[4]+task.remote_offset;
+        if(lane_idx==6)wqe_word=task.num_hidden_bytes;
+        if(lane_idx==7)wqe_word=task.src_addr;
+        if constexpr(kNumSGEs==2) {
+            if(lane_idx==8)wqe_word=task.num_metadata_bytes;
+            if(lane_idx==9)wqe_word=task.metadata_addr;
+        }
+        // A two-BB record can straddle SQ end after an odd scalar control WR.
+        // Wrap each BB, including the second BB of the same WQE.
+        const auto bb_idx=(token_sqebb_idx+lane_idx/8) & (handle::kSQDepth-1);
+        auto gm_wqe=reinterpret_cast<__gm__ uint64_t*>(sq_base_addr+uint64_t(bb_idx)*handle::kNumWQEBBBytes);
+        asc_stcg(gm_wqe+lane_idx%8,wqe_word);
+    }
+    asc_threadfence();
+}
+
+template<int kNumSGEs,int64_t Timeout>
+__aicore__ inline void issue_write_task(handle::HcommJetty& jetty,uint32_t& num_tokens,uint32_t& inflight) {
+    if(num_tokens==0)return;
+    constexpr uint32_t kNumWQEBBsPerToken=(48+16*kNumSGEs+63)/64;
+    static_assert(kNumMaxPendingWrites*kNumWQEBBsPerToken<handle::kSQDepth);
+    if(inflight+num_tokens>kNumMaxPendingWrites)flush_writes<Timeout>(jetty,inflight);
+    // Each preceding group has drained; at most 32 CQEs/64 SQ BBs are live.
+    // Existing caller checks cq_depth > 32+10, so no poll of unpublished WRs.
     const auto current_head=static_cast<uint32_t>(jetty.jetty_info->packed_head);
-    jetty.template poll_cq_when_sq_overflow<Timeout>();
-    jetty.template build_write_sqe<false>(peer,nullptr,reinterpret_cast<__gm__ void*>(offset),
-        x,num_hidden_bytes,current_head);
-    auto sqe=reinterpret_cast<__ubuf__ AscendC::HcommUrmaSqeCtx*>(jetty.ub_sqe);
-    sqe->sgeNum=num_sges;
-    auto sge=reinterpret_cast<__ubuf__ AscendC::HcommUrmaSgeCtx*>(
-        jetty.ub_sqe+sizeof(AscendC::HcommUrmaSqeCtx))+1;
-    sge->len=num_metadata_bytes;
-    sge->tokenId=0;
-    sge->va=reinterpret_cast<uint64_t>(metadata_send_buffer);
-    // copy_sqe_to_sq transfers complete WQEBBs, including the tail after SGEs.
-    constexpr uint32_t num_sqe_bytes=sizeof(AscendC::HcommUrmaSqeCtx)+
-        num_sges*sizeof(AscendC::HcommUrmaSgeCtx);
-    static_assert(num_sqe_bytes%sizeof(uint64_t)==0);
-    for(uint32_t i=num_sqe_bytes/sizeof(uint64_t);
-        i<num_wqebbs*handle::kNumWQEBBBytes/sizeof(uint64_t);++i)
-        reinterpret_cast<__ubuf__ uint64_t*>(jetty.ub_sqe)[i]=0;
-    jetty.copy_sqe_to_sq(current_head,num_wqebbs);
-    jetty.advance_sq(num_wqebbs);
-    if(++inflight==kNumMaxPendingWrites) flush_writes<Timeout>(jetty,inflight);
+    asc_sync_notify(PIPE_S,PIPE_V,EVENT_ID4);
+    asc_sync_wait(PIPE_S,PIPE_V,EVENT_ID4);
+    AscendC::Simt::VF_CALL<issue_write_wqe<kNumSGEs>>(
+        AscendC::Simt::Dim3(kNumWritesPerTask*warpSize,1,1),
+        reinterpret_cast<__ubuf__ const WriteTask*>(jetty.ub_sqe),
+        jetty.jetty_info->sq_base_addr,current_head,num_tokens);
+    asc_sync_notify(PIPE_V,PIPE_S,EVENT_ID4);
+    asc_sync_wait(PIPE_V,PIPE_S,EVENT_ID4);
+    const auto completions=static_cast<uint32_t>(jetty.jetty_info->packed_head>>32)+num_tokens;
+    jetty.jetty_info->packed_head=uint64_t(uint32_t(current_head+num_tokens*kNumWQEBBsPerToken))|
+        (uint64_t(completions)<<32);
+    inflight+=num_tokens;num_tokens=0;
+    if(inflight==kNumMaxPendingWrites)flush_writes<Timeout>(jetty,inflight);
+}
+
+template<int kNumSGEs,int64_t Timeout>
+__aicore__ inline void append_write_task(handle::HcommJetty& jetty,const handle::HcommPeer& peer,
+    uint64_t offset,__gm__ void* x,__gm__ void* metadata_send_buffer,
+    uint32_t num_hidden_bytes,uint32_t num_metadata_bytes,uint32_t& num_tokens,uint32_t& inflight) {
+    const uint64_t bytes=uint64_t(num_hidden_bytes)+num_metadata_bytes;
+    EP_DEVICE_ASSERT(num_hidden_bytes>0 && bytes<=UINT32_MAX);
+    EP_DEVICE_ASSERT(offset<=peer.peer_info->rmt_buffer_size && bytes<=peer.peer_info->rmt_buffer_size-offset);
+    auto tasks=reinterpret_cast<__ubuf__ WriteTask*>(jetty.ub_sqe);
+    tasks[num_tokens++]={reinterpret_cast<uint64_t>(peer.peer_info),offset,
+        reinterpret_cast<uint64_t>(x),reinterpret_cast<uint64_t>(metadata_send_buffer),num_hidden_bytes,num_metadata_bytes};
+    if(num_tokens==kNumWritesPerTask)issue_write_task<kNumSGEs,Timeout>(jetty,num_tokens,inflight);
 }
 
 template<int N,int E,int K,int NC,int X,int S,int C,int T,int U,int64_t Timeout>
@@ -379,6 +429,7 @@ __global__ __vector__ void dispatch_send_impl(
                 asc_sync_wait(PIPE_MTE3,PIPE_MTE2,static_cast<event_t>(stage_idx+2));
             asc_sync_notify(PIPE_MTE2,PIPE_S,EVENT_ID0);
             asc_sync_wait(PIPE_MTE2,PIPE_S,EVENT_ID0);
+            uint32_t num_task_tokens=0;
             for(uint32_t i=0;i<size;++i) {
                 const uint32_t row=tile*T+i,global=begin+row;
                 const auto gm_meta=ws+w.metadata_send_buffer+uint64_t(row)*M;
@@ -386,10 +437,11 @@ __global__ __vector__ void dispatch_send_impl(
                     const int f=ub->dst_rank_idx[i*K+k];if(f<0)continue;
                     peer.peer_info=ub->peer_info+f;
                     const uint64_t off=addresses[lane_idx*N+f].records_offset+uint64_t(ub->dst_slot_idx[i*K+k])*token_layout.record_stride();
-                    put_record_at_offset<Timeout>(jetty,peer,off,
-                        static_cast<__gm__ uint8_t*>(x)+uint64_t(global)*X,gm_meta,X,M,inflight);
+                    append_write_task<2,Timeout>(jetty,peer,off,
+                        static_cast<__gm__ uint8_t*>(x)+uint64_t(global)*X,gm_meta,X,M,num_task_tokens,inflight);
                 }
             }
+            issue_write_task<2,Timeout>(jetty,num_task_tokens,inflight);
             flush_writes<Timeout>(jetty,inflight);
         }
         local_join();
