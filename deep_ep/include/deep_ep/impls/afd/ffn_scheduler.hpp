@@ -15,44 +15,68 @@ __aicore__ inline bool scheduler_same(const AFDLane& a,const AFDPendingLane& p,
         p.inbox.microbatch_idx==q.inbox.microbatch_idx && p.inbox.layer_idx==q.inbox.layer_idx &&
         p.inbox.round_idx==q.inbox.round_idx && p.inbox.num_comm_rounds==q.inbox.num_comm_rounds;
 }
-// Finite metadata search: slots are not members. All registered physical members
-// must have exactly one matching slot; missing/duplicate members never pass arrival.
+// AFD-only directory: slots are not members. Rebuild in two quadratic passes
+// once per invocation, rather than rediscovering representatives for every task.
+// Scratch uses Pending's private reserved bytes; payload/Active budgets do not grow.
+template<int L>
+__aicore__ inline void scheduler_index_members(__gm__ const AFDLane* lanes,
+                                               __gm__ AFDPendingLane* pending,uint32_t& error) {
+    for(int i=0;i<L;++i) {
+        const auto member=recv_read(lanes+i);
+        const auto p=recv_read(pending+i);
+        uint32_t representative=i;
+        for(int j=0;j<i;++j) {
+            const auto prior=recv_read(lanes+j);
+            if(prior.dp_idx==member.dp_idx && prior.phase==member.phase && prior.member_idx==member.member_idx) {
+                if(representative==uint32_t(i))representative=j;
+                // Validate duplicates once for the immutable Pending snapshot.
+                // No per-candidate GM marks or barriers are needed afterwards.
+                if(p.valid && scheduler_same(member,p,prior,recv_read(pending+j)))error=BAD_TASK;
+            }
+        }
+        AscendC::WriteGmByPassDCache(&pending[i].member_leader,representative);
+    }
+    AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
+    for(int i=0;i<L;++i) {
+        const auto member=recv_read(lanes+i);
+        uint32_t count=0;
+        for(int j=0;j<L;++j) {
+            const auto prior=recv_read(lanes+j);
+            if(prior.dp_idx==member.dp_idx && prior.phase==member.phase &&
+               recv_read(&pending[j].member_leader)==uint32_t(j))++count;
+        }
+        AscendC::WriteGmByPassDCache(&pending[i].num_group_members,count);
+    }
+    AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
+}
+
+// Count matching distinct physical members in one lane scan. Every matched lane
+// belongs to the registered group, so equal cardinality + uniqueness proves
+// exact membership (including zero-route members and inactive sibling slots).
+// Uniqueness was checked by scheduler_index_members before any selection.
 template<int L,bool PRECHECK>
 __aicore__ inline bool scheduler_ready(int leader,__gm__ const AFDLane* lanes,
-    __gm__ const AFDPendingLane* pending,__gm__ const AFDReturnLane* returns,
+    __gm__ AFDPendingLane* pending,__gm__ const AFDReturnLane* returns,
     __gm__ const uint8_t* control,__ubuf__ uint8_t* tmp,uint32_t& error) {
     auto a=recv_read(lanes+leader);auto p=recv_read(pending+leader);
     if(!p.valid) return false;
     for(int i=0;i<leader;++i)
         if(scheduler_same(a,p,recv_read(lanes+i),recv_read(pending+i))) return false;
     bool complete=true;
-    for(int i=0;i<L;++i) {
-        auto member=recv_read(lanes+i);
-        if(member.dp_idx!=a.dp_idx || member.phase!=a.phase) continue;
-        bool representative=true;
-        for(int j=0;j<i;++j) {
-            auto prior=recv_read(lanes+j);
-            if(prior.dp_idx==member.dp_idx && prior.phase==member.phase && prior.member_idx==member.member_idx)
-                representative=false;
-        }
-        if(!representative) continue;
-        int matches=0;
-        for(int j=0;j<L;++j) {
-            auto b=recv_read(lanes+j);auto q=recv_read(pending+j);
-            if(b.member_idx!=member.member_idx || !scheduler_same(a,p,b,q)) continue;
-            ++matches;
-            if constexpr(PRECHECK) {
+    uint32_t matches=0;
+    for(int j=0;j<L;++j) {
+        auto b=recv_read(lanes+j);auto q=recv_read(pending+j);
+        if(!scheduler_same(a,p,b,q))continue;
+        ++matches;
+        if constexpr(PRECHECK) {
+            if(q.grant_state!=HELD) {
                 auto ret=recv_read(returns+j);
-                if(q.grant_state!=HELD) {
-                    recv_load(tmp,control+ret.credit_offset,32);
-                    if(*reinterpret_cast<__ubuf__ uint32_t*>(tmp)!=q.inbox.return_bit) complete=false;
-                }
+                recv_load(tmp,control+ret.credit_offset,32);
+                if(*reinterpret_cast<__ubuf__ uint32_t*>(tmp)!=q.inbox.return_bit)complete=false;
             }
         }
-        if(matches>1) error=BAD_TASK;
-        if(matches!=1) complete=false;
     }
-    return complete && error==OK;
+    return complete && matches==p.num_group_members && error==OK;
 }
 
 template<int N,int E,int K,int L,int NL,int Q,int QA,int A,bool PRECHECK>
@@ -189,6 +213,7 @@ __global__ __vector__ void ffn_scheduler_impl(
         recv_store(cursors+uint64_t(i)*R,reinterpret_cast<__ubuf__ uint8_t*>(consumed),4*R);
         p.valid=1;p.grant_state=NONE;p.first_seen=state.tick;scheduler_write(pending+i,p,tmp);
     }
+    if(error==OK)scheduler_index_members<L>(lanes,pending,error);
     // Phase fairness: choose oldest ready alternative phase after every committed selection.
     int first=-1;uint64_t oldest=~uint64_t(0);bool alternative=false;
     for(int i=0;i<L && error==OK;++i) {

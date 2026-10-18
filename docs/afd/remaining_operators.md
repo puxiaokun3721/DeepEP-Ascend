@@ -75,3 +75,5 @@ timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.
 仍需A5验证：host扩展/JIT编译、裸UB LocalTensor及Cast/Muls/Add重载、短尾DMA、队列注册与CQ完成语义、URMA写到UBMEM控制的可见性、并发核活性、P单槽反复事务、D的M=2/3、混合phase、图replay和性能。禁止将CPU模型测试当作设备精度测试。
 
 2026-10-18：combineSend payload改用原生warp-per-WQE批量写SQ路径，与dispatchSend共享有界提交实现。每route一SGE、每WR一CQE、credit/Done/Consumed顺序不变；参见[发送侧优化记录](native_wqe_batching.md)。
+
+2026-10-18：ffnScheduler复用Pending预留字段建立每次调用的成员索引，将成员到齐查找最坏复杂度从O(L³)降至O(L²)，不增加分配。详见[成员索引优化](scheduler_member_index.md)。

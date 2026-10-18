@@ -1,6 +1,7 @@
 """Executable scheduler specification. CPU model, not C++/Ascend execution evidence."""
 from dataclasses import dataclass, field
 import unittest
+import random
 
 
 @dataclass
@@ -15,6 +16,36 @@ class Lane:
     credit: bool = True
     held: bool = False
     age: int = 0
+
+
+def indexed_ready(lanes, precheck=False):
+    """CPU model of the two-pass private directory; not kernel execution."""
+    representatives = []
+    for i, lane in enumerate(lanes):
+        representative = i
+        for j in range(i):
+            prior = lanes[j]
+            if (prior.dp, prior.phase, prior.member) != (lane.dp, lane.phase, lane.member):
+                continue
+            if representative == i:
+                representative = j
+            if lane.task is not None and prior.task == lane.task:
+                raise ValueError('duplicate member')
+        representatives.append(representative)
+    required = [sum(prior.dp == lane.dp and prior.phase == lane.phase and representatives[j] == j
+                    for j, prior in enumerate(lanes)) for lane in lanes]
+    ready = []
+    for i, lane in enumerate(lanes):
+        if lane.task is None:
+            continue
+        key = (lane.dp, lane.phase, lane.task)
+        matches = [j for j, other in enumerate(lanes)
+                   if other.task is not None and (other.dp, other.phase, other.task) == key]
+        if matches[0] != i:
+            continue
+        if len(matches) == required[i] and (not precheck or all(lanes[j].credit or lanes[j].held for j in matches)):
+            ready.append(tuple(matches))
+    return ready
 
 
 class Scheduler:
@@ -161,6 +192,74 @@ class SchedulerTests(unittest.TestCase):
             s.publish(i, (0, 1, 0, 1), [1])
         with self.assertRaises(ValueError):
             s.select()
+
+
+
+
+class IndexedDirectoryTests(unittest.TestCase):
+    def test_randomized_set_oracle(self):
+        rng = random.Random(950)
+        for case_idx in range(300):
+            lanes = [Lane(dp, member, phase=phase, task=rng.choice([None, (0, 2, 0, 3), (1, 2, 0, 3)]),
+                          credit=rng.choice([False, True]), held=rng.choice([False, True]))
+                     for dp in range(2) for phase in range(2) for member in range(3) for slot in range(3)]
+            rng.shuffle(lanes)
+            if case_idx % 2 == 0:
+                seen = set()
+                for lane in lanes:
+                    key = (lane.dp, lane.phase, lane.member, lane.task)
+                    if key in seen:
+                        lane.task = None
+                    elif lane.task is not None:
+                        seen.add(key)
+            groups = {}
+            for i, lane in enumerate(lanes):
+                if lane.task is not None:
+                    groups.setdefault((lane.dp, lane.phase, lane.task), []).append(i)
+            duplicate = any(len({lanes[i].member for i in group}) != len(group) for group in groups.values())
+            for precheck in (False, True):
+                if duplicate:
+                    with self.assertRaises(ValueError):
+                        indexed_ready(lanes, precheck)
+                    continue
+                expected = []
+                for (dp, phase, task), group in groups.items():
+                    required = {l.member for l in lanes if (l.dp, l.phase) == (dp, phase)}
+                    if {lanes[i].member for i in group} == required and (not precheck or all(lanes[i].credit or lanes[i].held for i in group)):
+                        expected.append(tuple(group))
+                self.assertEqual(indexed_ready(lanes, precheck), expected)
+
+    def test_multiple_slots_missing_members_and_held_credit(self):
+        for slots in (2, 3):
+            lanes = [Lane(0, member) for member in range(2) for slot in range(slots)]
+            for slot in range(slots):
+                task = (slot, 4, 2, 8)
+                lanes[slot].task = task
+                lanes[slots+slot].task = task
+                lanes[slots+slot].counts = [0]  # Exhausted owner still participates.
+            expected = [(slot, slots+slot) for slot in range(slots)]
+            self.assertEqual(indexed_ready(lanes), expected)
+            lanes[slots].credit = False
+            self.assertEqual(indexed_ready(lanes, True), expected[1:])
+            self.assertEqual(indexed_ready(lanes, False), expected)
+            lanes[slots].held = True
+            self.assertEqual(indexed_ready(lanes, True), expected)
+            lanes[slots].task = None
+            self.assertEqual(indexed_ready(lanes), expected[1:])
+
+    def test_replay_rebuild_does_not_keep_stale_membership(self):
+        lanes = [Lane(0, 0), Lane(0, 1), Lane(0, 0), Lane(0, 1)]
+        for bit in (0, 1, 0):
+            lanes[0].task = lanes[1].task = (bit, 7, 0, 1)
+            self.assertEqual(indexed_ready(lanes), [(0, 1)])
+            lanes[2].task = lanes[0].task
+            with self.assertRaises(ValueError):
+                indexed_ready(lanes)
+            lanes[0].task = None
+            self.assertEqual(indexed_ready(lanes), [(1, 2)])
+            for lane in lanes:
+                lane.task = None
+            self.assertEqual(indexed_ready(lanes), [])
 
 
 if __name__ == '__main__':
