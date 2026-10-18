@@ -3,6 +3,9 @@
 #include <pybind11/stl.h>
 
 #include "buffers/base.hpp"
+// ### PATCH START: AFD sender binding
+#include "buffers/afd.hpp"
+// ### PATCH END: AFD sender binding
 #include "buffers/bucket.hpp"
 #include "buffers/engram.hpp"
 #include "buffers/ep.hpp"
@@ -29,6 +32,46 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     comm::register_apis(m);
     base::register_apis(m);
+
+    // ### PATCH START: AFD owner and unchanged dispatchSend Tensor signature
+    py::class_<AFDBuffer,std::shared_ptr<AFDBuffer>>(m, "AFDBuffer")
+        .def(py::init<int,const std::string&,const std::vector<int>&,const std::vector<int>&,
+             const std::vector<std::array<uint32_t,6>>&,const std::vector<uint32_t>&,
+             int,int,int,int,int,bool,int,int,int,uint64_t,uint64_t>())
+        .def_property_readonly("context",&AFDBuffer::context)
+        .def_property_readonly("control_buffer",&AFDBuffer::control_buffer)
+        .def_property_readonly("round_ledger",&AFDBuffer::round_ledger)
+        .def_property_readonly("workspace",&AFDBuffer::workspace)
+        .def_property_readonly("send_status",&AFDBuffer::send_status)
+        .def_property_readonly("payload",&AFDBuffer::payload)
+        .def("memory_usage",&AFDBuffer::memory_usage)
+        .def("destroy",&AFDBuffer::destroy)
+        .def("dispatchSend",&AFDBuffer::dispatchSend)
+        .def_static("create_local_receiver",&AFDBuffer::create_local_receiver)
+        .def("prepare_recv",&AFDBuffer::prepare_recv,py::arg("q"),py::arg("q_alloc"),
+             py::arg("expert_alignment"),py::arg("sf_column_major")=false)
+        .def_property_readonly("active",&AFDBuffer::active)
+        .def_property_readonly("execution_state",&AFDBuffer::execution_state)
+        .def_property_readonly("recv_workspace",&AFDBuffer::recv_workspace)
+        .def_property_readonly("recv_x",&AFDBuffer::recv_x)
+        .def_property_readonly("recv_sf",&AFDBuffer::recv_sf)
+        .def_property_readonly("recv_src_metadata",&AFDBuffer::recv_src_metadata)
+        .def("dispatchRecv",&AFDBuffer::dispatchRecv)
+        .def("prepare_ffn",&AFDBuffer::prepare_ffn,py::arg("precheck")=false)
+        .def("prepare_combine_recv",&AFDBuffer::prepare_combine_recv)
+        .def_property_readonly("scheduler_workspace",&AFDBuffer::scheduler_workspace)
+        .def_property_readonly("completion",&AFDBuffer::completion)
+        .def_property_readonly("psum_num_recv_tokens_per_expert",&AFDBuffer::psum_num_recv_tokens_per_expert)
+        .def_property_readonly("num_unaligned_recv_tokens_per_expert",&AFDBuffer::num_unaligned_recv_tokens_per_expert)
+        .def_property_readonly("combine_x",&AFDBuffer::combine_x)
+        .def_property_readonly("combine_send_workspace",&AFDBuffer::combine_send_workspace)
+        .def_property_readonly("combine_recv_workspace",&AFDBuffer::combine_recv_workspace)
+        .def_property_readonly("recv_status",&AFDBuffer::recv_status)
+        .def("ffnScheduler",&AFDBuffer::ffnScheduler)
+        .def("computeReady",&AFDBuffer::computeReady)
+        .def("combineSend",&AFDBuffer::combineSend)
+        .def("combineRecv",&AFDBuffer::combineRecv);
+    // ### PATCH END: AFD owner and unchanged dispatchSend Tensor signature
 
     py::class_<EPBuffer, BufferBase>(m, "EPBuffer")
         .def(py::init<int, int, std::string, int64_t, int64_t, bool, int, int, bool>())

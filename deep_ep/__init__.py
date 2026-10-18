@@ -40,3 +40,7 @@ from .utils.envs import init_seed, get_local_seed, get_global_seed, dist_print, 
 from .utils.testing import KernelProfile, bench_msprof
 
 __version__ = '1.0.0'
+
+# ### PATCH START: AFD experimental sender owner
+from ._C import AFDBuffer
+# ### PATCH END: AFD experimental sender owner

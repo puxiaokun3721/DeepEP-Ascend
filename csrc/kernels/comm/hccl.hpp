@@ -36,6 +36,10 @@ struct HCCLContext {
     int num_ranks = 0;
     int rank_idx = 0;
     std::vector<int64_t> peer_ptrs;
+    // ### PATCH START: AFD independent registration lengths
+    std::vector<uint64_t> peer_buffer_bytes;
+    bool allow_asymmetric_buffers = false;
+    // ### PATCH END: AFD independent registration lengths
 
     // HCCL registration for UB_MEM address discovery
     HcclMemHandle mem_handle = nullptr;
@@ -45,14 +49,23 @@ struct HCCLContext {
     std::vector<ChannelHandle> channel_handles;
     void* jetty_device_ptrs = nullptr;  // Device copy of `channel_handles`
 
+    // AFD extends construction with an opt-in final parameter. Default preserves EP.
+    // The opt-in permits unequal peer allocations and requests the SQ depth used by the encoder.
     HCCLContext(const std::string& hccl_group_name, const int& rank_idx,
                 const int& num_ranks, const int64_t& num_bytes,
                 const int& num_jetties, const int& num_cpu_timeout_secs, const bool& use_huge1g_page,
-                const std::shared_ptr<symmetric::SymmetricMemory>& shared_memory = nullptr):
+                const std::shared_ptr<symmetric::SymmetricMemory>& shared_memory = nullptr,
+                const bool allow_asymmetric_buffers = false):
         num_bytes(num_bytes),
         num_ranks(num_ranks), rank_idx(rank_idx) {
         EP_HOST_ASSERT(num_bytes > 0);
         EP_HOST_ASSERT(num_ranks > 0 and rank_idx >= 0 and rank_idx < num_ranks);
+        // ### PATCH START: AFD resource options
+        this->allow_asymmetric_buffers = allow_asymmetric_buffers;
+        peer_buffer_bytes.resize(num_ranks, 0);
+        peer_buffer_bytes[rank_idx] = num_bytes;
+        // ### PATCH END: AFD resource options
+
 
         // TODO: relationships between layer and Jetties
         EP_HOST_ASSERT(num_jetties > 0);
@@ -188,7 +201,11 @@ private:
             char** mem_tags = nullptr;
             HCCL_CHECK(HcclChannelGetRemoteMems(comm, channels[i], &num_mems, &remote_mems, &mem_tags));
             EP_HOST_ASSERT(num_mems >= 1);
-            EP_HOST_ASSERT(remote_mems[num_mems - 1].size == this->num_bytes);
+            // ### PATCH START: AFD non-symmetric payload registration
+            EP_HOST_ASSERT(allow_asymmetric_buffers || remote_mems[num_mems - 1].size == this->num_bytes);
+            EP_HOST_ASSERT(remote_mems[num_mems - 1].size > 0);
+            peer_buffer_bytes[peer_rank_idx] = remote_mems[num_mems - 1].size;
+            // ### PATCH END: AFD non-symmetric payload registration
             peer_ptrs[peer_rank_idx] = reinterpret_cast<int64_t>(remote_mems[num_mems - 1].addr);
         }
     }
@@ -264,7 +281,11 @@ private:
             desc.port = listen_ports[std::min(rank_idx, peer_rank_idx)];
             desc.channelName = channel_names[channel_idx].c_str();
             // Leave desc.qos at 0xFFFFFFFF to use HCOMM's default UB QoS (4).
-            // Leave desc.ubAttr.sqDepth at 0xFFFFFFFF (UB_SQ_DEPTH_NOT_SET) to use HCOMM's default depth.
+            // ### PATCH START: AFD explicit SQ encoder depth
+            // Device encoder uses 32768 WQEBBs; target HDK must verify the negotiated layout.
+            if (allow_asymmetric_buffers) desc.ubAttr.sqDepth = 32768;
+            // ### PATCH END: AFD explicit SQ encoder depth
+            // Original EP keeps the HCOMM default depth.
             HCOMM_CHECK(HcommChannelCreateWithConfig(jetty_endpoints[channel_idx % num_jetties], CommEngine::COMM_ENGINE_AIV,
                                                      &desc, 1, config, channel_handles.data() + channel_idx));
         }
