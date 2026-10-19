@@ -298,3 +298,8 @@ DeepEP-Ascend is built on top of Huawei's HCCL/HCOMM, UBMEM and URMA communicati
     howpublished = {\url{https://github.com/deepseek-ai/DeepEP-Ascend}},
 }
 ```
+
+
+## AFD development
+
+[当前设计、实现说明与验证边界](docs/afd/README.md)。

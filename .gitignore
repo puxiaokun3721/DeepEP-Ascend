@@ -13,3 +13,6 @@ cmake-build-*/
 .clangd*
 compile_commands.json
 /deep_ep/_C.pyi
+
+# Local documentation history and review records
+/.local-archive/

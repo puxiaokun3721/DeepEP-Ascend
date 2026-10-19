@@ -1,7 +1,6 @@
 # dispatchSend / dispatchRecv 原生结构对照
 
-整理日期：2026-10-19。整理前基线为e16ac50，原生参考为3b25377。
-本次只改名称、阶段注释和排版；没有增加功能、恢复新流水或改变性能策略。
+原生参考为 `3b25377`。本文说明当前函数边界与执行顺序；实现和验证状态见[AFD 入口](README.md)。
 
 ## 名称与边界
 
@@ -66,5 +65,4 @@ R3是lambda定义位置，实际调用在R4/R5；不能把图中的函数定义�
 - 接收：refs加载仍位于record refill保护等待之前；MTE2→S、MTE3→MTE2和metadata独立MTE3→S事件及循环位置不变。
 - 原生大阶段继续内联，未引入新的函数调用/同步边界、缓冲区或workspace。
 - JIT生成代码改用限定名称deep_ep::afd::dispatch_impl及deep_ep::afd::dispatch_copy_epilogue_impl；缓存标签、模板参数顺序、launch参数及Python接口不变。
-- 对e16ac50执行注释/空白移除及显式标识符重命名归一化：两个kernel token序列完全相同；JIT仅两处入口引用变化。该检查证明此次编辑未改变执行语句，不证明既有算法或编译产物正确。
 - 56项CPU模型测试通过；git diff --check通过。尚未做CANN/JIT编译或A5执行，尤其内部kernel改名后的符号实例化须实机确认。没有新增精度/性能通过声明。

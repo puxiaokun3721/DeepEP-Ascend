@@ -133,6 +133,6 @@ metadata stage沿用MTE2→S就绪和MTE3→MTE2复用保护，最后一次relea
 
 本轮联合CPU suite为27项（原sender10+recv15，再加2项复用回归测试）通过，13个Python文件AST检查通过；这些检查不执行C++设备核。新增单卡/双rank矩阵见 [测试说明](../../tests/afd/README.md)，均尚未上卡。A5 API重载、跨URMA/UBMEM可见性、队列完成、并发前进、故障域退出、图replay及性能均未验收。本说明不宣称完整CANNBot流程或生产准入通过。
 
-2026-10-18发送侧WQE批量构建的边界、同步与验证见 [发送侧优化记录](native_wqe_batching.md)。
+发送侧WQE批量构建的边界、同步与验证见 [当前实现边界](README.md#当前关键实现边界)。
 
 2026-10-19：源码已按原生函数边界和逻辑阶段整理；函数映射、阅读顺序及同步不变性验证见[dispatch代码导航](dispatch_code_map.md)。

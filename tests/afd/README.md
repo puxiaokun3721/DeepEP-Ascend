@@ -49,7 +49,7 @@ failure; those downstream operators are not yet implemented.
 This is the CPU contract/oracle portion of the approved test plan, not a completed A5 test harness. No torch or pytest dependency is required; NumPy is required. Tests do not import or execute the Ascend kernel.
 
 ```powershell
-python -B -m unittest discover -s D:/Code/refs/DeepEP-Ascend/tests/afd -p test_cpu.py -v
+python -B -m unittest discover -s tests/afd -p test_cpu.py -v
 ```
 
 On Linux, `bash tests/afd/run.sh` runs the same CPU suite. `gen_data.py OUTPUT.npz [--fp8] [--batch N]` creates deterministic raw-byte inputs. BF16/FP8 payloads and FP32 weights are represented as bytes/bits so NaN payloads are not canonicalized. `verify_dump.py INPUTS.npz SNAPSHOT.npz` checks a **provided real F snapshot**. It does not collect a snapshot or launch an operator. Its module docstring gives the required keys.
