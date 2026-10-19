@@ -155,3 +155,5 @@ workspace 仅 `32*num_vec_cores+256`；UB 预算为 `2*A32(T*D)+2*A32(16T)+2*A32
 copy采用Segment外层遍历，每核处理与自身目的区间相交的部分，因此支持Entry内Segment目的行乱序及跨核区间，无逐输出行全表扫描。保留原生 `issue_load`、`stage_num_tokens`、`stage_token_base_idx`、`stage_idx` 命名和双stage预加载/回填逻辑；连续record合并搬运，仅区间内部包含record对齐洞，最后一条不读未发送尾洞。MTE2→S保护消费，MTE3→MTE2保护record stage回填，独立MTE3→S保护metadata stage。padding另按专家区间生成，复用原生vector fill逻辑。
 
 剩余限制：core0结构校验仍含Segment两两检查；预检与copy仍有metadata双读；同record跨本地专家Segment仍可能重复读取，没有恢复完整token本地扇出。双stage主要在单Segment内部发挥作用，短Segment及列SF转置前的hidden完成等待会限制重叠；UB转列仍为标量重排。完全恢复token扇出需要有界反向映射/源分桶及目的ownership，不能通过整轮hidden缓存绕过预算。以上仅描述源码机制，不承诺原EP吞吐或任何已实测性能收益。
+
+2026-10-19：源码已按原生函数边界和逻辑阶段整理；函数映射、阅读顺序及同步不变性验证见[dispatch代码导航](dispatch_code_map.md)。

@@ -12,89 +12,100 @@
 
 // ### PATCH START: bounded AFD sender, adapted from impls/ep/dispatch.hpp at 3b25377d
 namespace deep_ep::afd {
+// Reading order (native 3b25377d -> AFD):
+// DispatchUBLayout -> route_tile -> queue helpers -> dispatch_impl.
+// [REUSE] means adapted upstream logic, not byte-identical code unless stated.
+// [AFD] means a new contract/phase with no equivalent collective semantics.
+// route_tile is NOT simt_persistent_worker: it runs twice per bounded tile.
+// Public dispatchSend/launcher names and template argument order remain stable.
 constexpr uint32_t kNumMaxPendingWrites=32;
-template<int E,int N,int K,int T,int M>
-struct alignas(32) DispatchSendUB {
-    alignas(32) int expert_histogram[E], expert_cursor[E];
-    alignas(32) int rank_histogram[N], rank_psum[N];
-    alignas(32) int dst_rank_idx[T*K], dst_slot_idx[T*K];
-    alignas(32) handle::HcommPeerInfo peer_info[N];
+// [REUSE+AFD] Native DispatchUBLayout naming; AFD bounded tiles and control scratch.
+template <int kNumExperts, int kNumRanks, int kNumTopk, int kNumTokensPerTile,
+          int kNumMetadataBytes>
+struct alignas(32) DispatchUBLayout {
+    alignas(32) int expert_histogram[kNumExperts], expert_cursor[kNumExperts];
+    alignas(32) int rank_histogram[kNumRanks], rank_psum[kNumRanks];
+    alignas(32) int dst_rank_idx[kNumTokensPerTile*kNumTopk], dst_slot_idx[kNumTokensPerTile*kNumTopk];
+    alignas(32) handle::HcommPeerInfo peer_info[kNumRanks];
     alignas(32) uint8_t jetty_info[96];
     alignas(32) uint8_t ub_sqe[512];
     alignas(32) uint8_t control_stage[256];
-    alignas(32) uint8_t metadata[2][4*M];
+    alignas(32) uint8_t metadata[2][4*kNumMetadataBytes];
 };
 
 // Original warp grouping, deduplicate and atomic histogram logic; no peer-rank self-copy.
 // Added fixed tiles, full int64 validation, optional masks, and a second route-emission pass.
-template<int E,int N,int K,int T,int M,bool Emit>
+template <int kNumExperts, int kNumRanks, int kNumTopk, int kNumTokensPerTile,
+          int kNumMetadataBytes, bool kEmitRoutes>
 __simt_vf__ __aicore__ __launch_bounds__(512) void route_tile(
-    __ubuf__ DispatchSendUB<E,N,K,T,M>* ub,
+    __ubuf__ DispatchUBLayout<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes>* ub,
     __gm__ int64_t* topk_idx, __gm__ uint8_t* token_mask,
     __gm__ uint32_t* counts, __gm__ uint32_t* tile_psum,
     __gm__ uint32_t* expert_prefix, __gm__ int32_t* dst_slots,
     __gm__ uint32_t* route_reference, __gm__ uint32_t* error,
     uint32_t token_begin, uint32_t tile_begin, uint32_t num_tokens) {
-    const int tid=threadIdx.x, lane=tid%32;
-    constexpr int G=K==1 ? 1 : 1<<(32-__builtin_clz(unsigned(K-1)));
+    const int thread_idx=threadIdx.x, lane_idx=thread_idx%32;
+    constexpr int G=kNumTopk==1 ? 1 : 1<<(32-__builtin_clz(unsigned(kNumTopk-1)));
     constexpr int groups=512/G;
-    const int g=tid/G, gl=tid%G;
-    const uint32_t mask=(0xffffffffu>>(32-G))<<(lane/G*G);
-    if(tid<E) ub->expert_histogram[tid]=0;
-    if(tid<N) ub->rank_histogram[tid]=0;
+    const int g=thread_idx/G, gl=thread_idx%G;
+    const uint32_t mask=(0xffffffffu>>(32-G))<<(lane_idx/G*G);
+    if(thread_idx<kNumExperts) ub->expert_histogram[thread_idx]=0;
+    if(thread_idx<kNumRanks) ub->rank_histogram[thread_idx]=0;
     asc_syncthreads();
     for(int i=g;i<((num_tokens+groups-1)/groups)*groups;i+=groups) {
         const bool live=i<num_tokens && (token_mask==nullptr || token_mask[uint64_t(token_begin)+tile_begin+i]);
         int expert=-1;
-        if(live && gl<K) {
-            const int64_t value=topk_idx[(uint64_t(token_begin)+tile_begin+i)*K+gl];
-            if(value<0 || value>=E) asc_atomic_max(error,uint32_t(BAD_ROUTE));
+        if(live && gl<kNumTopk) {
+            const int64_t value=topk_idx[(uint64_t(token_begin)+tile_begin+i)*kNumTopk+gl];
+            if(value<0 || value>=kNumExperts) asc_atomic_max(error,uint32_t(BAD_ROUTE));
             else expert=int(value);
         }
         // Check distinct experts without truncating invalid int64 values into legal IDs.
-        for(int k=0;k<K;++k) {
-            const int other=asc_shfl(expert,lane/G*G+k);
-            if(live && gl<K && k<gl && expert>=0 && other==expert)
+        for(int k=0;k<kNumTopk;++k) {
+            const int other=asc_shfl(expert,lane_idx/G*G+k);
+            if(live && gl<kNumTopk && k<gl && expert>=0 && other==expert)
                 asc_atomic_max(error,uint32_t(BAD_ROUTE));
         }
-        const int rank=expert<0 ? -1 : expert/(E/N);
-        const bool representative=simt::deduplicate<N>(rank,lane,mask);
+        const int rank=expert<0 ? -1 : expert/(kNumExperts/kNumRanks);
+        const bool representative=simt::deduplicate<kNumRanks>(rank,lane_idx,mask);
         int slot=-1;
         if(rank>=0 && representative) slot=asc_atomic_add(ub->rank_histogram+rank,1);
         const int ordinal=expert>=0 ? asc_atomic_add(ub->expert_histogram+expert,1) : -1;
-        if constexpr(Emit) {
+        if constexpr(kEmitRoutes) {
             if(slot>=0) slot+=asc_ldcg(tile_psum+rank);
             int record=-1;
-            for(int k=0;k<K;++k) {
-                const int peer=asc_shfl(representative?rank:-1,lane/G*G+k);
-                const int value=asc_shfl(slot,lane/G*G+k);
+            for(int k=0;k<kNumTopk;++k) {
+                const int peer=asc_shfl(representative?rank:-1,lane_idx/G*G+k);
+                const int value=asc_shfl(slot,lane_idx/G*G+k);
                 if(rank>=0 && peer==rank) record=value;
             }
-            if(i<num_tokens && gl<K) {
-                ub->dst_rank_idx[i*K+gl]=representative?rank:-1;
-                ub->dst_slot_idx[i*K+gl]=record;
-                asc_stcg(dst_slots+uint64_t(tile_begin+i)*K+gl,record);
+            if(i<num_tokens && gl<kNumTopk) {
+                ub->dst_rank_idx[i*kNumTopk+gl]=representative?rank:-1;
+                ub->dst_slot_idx[i*kNumTopk+gl]=record;
+                asc_stcg(dst_slots+uint64_t(tile_begin+i)*kNumTopk+gl,record);
                 if(expert>=0) {
-                    const uint64_t row=uint64_t(asc_ldcg(expert_prefix+expert))+asc_ldcg(tile_psum+N+expert)+ordinal;
-                    asc_stcg(route_reference+row,uint32_t(record*K+gl));
+                    const uint64_t row=uint64_t(asc_ldcg(expert_prefix+expert))+asc_ldcg(tile_psum+kNumRanks+expert)+ordinal;
+                    asc_stcg(route_reference+row,uint32_t(record*kNumTopk+gl));
                 }
             }
         }
     }
     asc_syncthreads();
-    if constexpr(!Emit) {
-        if(tid<N) asc_stcg(counts+tid,uint32_t(ub->rank_histogram[tid]));
-        if(tid<E) asc_stcg(counts+N+tid,uint32_t(ub->expert_histogram[tid]));
+    if constexpr(!kEmitRoutes) {
+        if(thread_idx<kNumRanks) asc_stcg(counts+thread_idx,uint32_t(ub->rank_histogram[thread_idx]));
+        if(thread_idx<kNumExperts) asc_stcg(counts+kNumRanks+thread_idx,uint32_t(ub->expert_histogram[thread_idx]));
     }
     asc_threadfence();
 }
 
+// [AFD] Local AIV join only; never substitute the native all-rank barrier here.
 __aicore__ inline void local_join() {
     asc_sync_notify(PIPE_MTE3,PIPE_V,EVENT_ID0);
     asc_sync_wait(PIPE_MTE3,PIPE_V,EVENT_ID0);
     AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
     AscendC::SyncAll<true>();
 }
+// [AFD] Consumer-local control loads/stores and alternating-bit polling helpers.
 __aicore__ inline void load_control(__ubuf__ uint8_t* ub,__gm__ void* src) {
     asc_copy_gm2ub_align(ub,static_cast<__gm__ uint8_t*>(src),1,32,0,0,false,
         static_cast<uint8_t>(LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV),uint64_t(32),32);
@@ -109,32 +120,32 @@ __aicore__ inline void store_control(__gm__ void* dst,__ubuf__ uint8_t* ub,uint3
     asc_sync_notify(PIPE_MTE3,PIPE_S,EVENT_ID1);
     asc_sync_wait(PIPE_MTE3,PIPE_S,EVENT_ID1);
 }
-template<int64_t Timeout>
+template <int64_t kNumTimeoutCycles>
 __aicore__ inline bool wait_control(__ubuf__ uint8_t* ub,__gm__ void* src,uint32_t wanted) {
     const uint64_t start=asc_get_system_cycle();
     do {
         load_control(ub,src);
         if(*reinterpret_cast<__ubuf__ uint32_t*>(ub)==wanted) return true;
-    } while(uint64_t(asc_get_system_cycle())-start<uint64_t(Timeout));
+    } while(uint64_t(asc_get_system_cycle())-start<uint64_t(kNumTimeoutCycles));
     return false;
 }
 // Integer-only offset token: build_write_sqe never dereferences the synthetic destination.
 // Reuses original bounds checks, strong ordering/fence/CQE, SQ wrap and completion accounting.
 // Commit a bounded group before drain: drain must never wait for unpublished SQEs.
-template<int64_t Timeout>
+template <int64_t kNumTimeoutCycles>
 __aicore__ inline void flush_writes(handle::HcommJetty& jetty,uint32_t& inflight) {
     if(inflight==0) return;
     jetty.ring_doorbell();
-    jetty.template drain<Timeout>();
+    jetty.template drain<kNumTimeoutCycles>();
     inflight=0;
 }
-template<int64_t Timeout>
+template <int64_t kNumTimeoutCycles>
 __aicore__ inline void put_at_offset(handle::HcommJetty& jetty,const handle::HcommPeer& peer,
     uint64_t offset,__gm__ void* src,uint64_t bytes,uint32_t& inflight) {
     EP_DEVICE_ASSERT(bytes>0 && bytes<=UINT32_MAX);
     EP_DEVICE_ASSERT(offset<=peer.peer_info->rmt_buffer_size && bytes<=peer.peer_info->rmt_buffer_size-offset);
-    jetty.template put<Timeout,false>(peer,nullptr,reinterpret_cast<__gm__ void*>(offset),src,bytes);
-    if(++inflight==kNumMaxPendingWrites) flush_writes<Timeout>(jetty,inflight);
+    jetty.template put<kNumTimeoutCycles,false>(peer,nullptr,reinterpret_cast<__gm__ void*>(offset),src,bytes);
+    if(++inflight==kNumMaxPendingWrites) flush_writes<kNumTimeoutCycles>(jetty,inflight);
 }
 
 // Upstream: ep/combine.hpp::load_meta_issue_wqe, one warp constructs one WQE.
@@ -148,7 +159,7 @@ struct WriteTask {
 };
 static_assert(sizeof(WriteTask)*kNumWritesPerTask<=512);
 
-template<int kNumSGEs>
+template <int kNumSGEs>
 __simt_vf__ __aicore__ __launch_bounds__(kNumWritesPerTask*warpSize)
 void issue_write_wqe(__ubuf__ const WriteTask* tasks,const uint64_t sq_base_addr,
                      const uint32_t task_sqebb_idx,const uint32_t num_tokens) {
@@ -188,12 +199,12 @@ void issue_write_wqe(__ubuf__ const WriteTask* tasks,const uint64_t sq_base_addr
     asc_threadfence();
 }
 
-template<int kNumSGEs,int64_t Timeout>
+template <int kNumSGEs, int64_t kNumTimeoutCycles>
 __aicore__ inline void issue_write_task(handle::HcommJetty& jetty,uint32_t& num_tokens,uint32_t& inflight) {
     if(num_tokens==0)return;
     constexpr uint32_t kNumWQEBBsPerToken=(48+16*kNumSGEs+63)/64;
     static_assert(kNumMaxPendingWrites*kNumWQEBBsPerToken<handle::kSQDepth);
-    if(inflight+num_tokens>kNumMaxPendingWrites)flush_writes<Timeout>(jetty,inflight);
+    if(inflight+num_tokens>kNumMaxPendingWrites)flush_writes<kNumTimeoutCycles>(jetty,inflight);
     // Each preceding group has drained; at most 32 CQEs/64 SQ BBs are live.
     // Existing caller checks cq_depth > 32+10, so no poll of unpublished WRs.
     const auto current_head=static_cast<uint32_t>(jetty.jetty_info->packed_head);
@@ -209,10 +220,10 @@ __aicore__ inline void issue_write_task(handle::HcommJetty& jetty,uint32_t& num_
     jetty.jetty_info->packed_head=uint64_t(uint32_t(current_head+num_tokens*kNumWQEBBsPerToken))|
         (uint64_t(completions)<<32);
     inflight+=num_tokens;num_tokens=0;
-    if(inflight==kNumMaxPendingWrites)flush_writes<Timeout>(jetty,inflight);
+    if(inflight==kNumMaxPendingWrites)flush_writes<kNumTimeoutCycles>(jetty,inflight);
 }
 
-template<int kNumSGEs,int64_t Timeout>
+template <int kNumSGEs, int64_t kNumTimeoutCycles>
 __aicore__ inline void append_write_task(handle::HcommJetty& jetty,const handle::HcommPeer& peer,
     uint64_t offset,__gm__ void* x,__gm__ void* metadata_send_buffer,
     uint32_t num_hidden_bytes,uint32_t num_metadata_bytes,uint32_t& num_tokens,uint32_t& inflight) {
@@ -222,23 +233,29 @@ __aicore__ inline void append_write_task(handle::HcommJetty& jetty,const handle:
     auto tasks=reinterpret_cast<__ubuf__ WriteTask*>(jetty.ub_sqe);
     tasks[num_tokens++]={reinterpret_cast<uint64_t>(peer.peer_info),offset,
         reinterpret_cast<uint64_t>(x),reinterpret_cast<uint64_t>(metadata_send_buffer),num_hidden_bytes,num_metadata_bytes};
-    if(num_tokens==kNumWritesPerTask)issue_write_task<kNumSGEs,Timeout>(jetty,num_tokens,inflight);
+    if(num_tokens==kNumWritesPerTask)issue_write_task<kNumSGEs,kNumTimeoutCycles>(jetty,num_tokens,inflight);
 }
 
-template<int N,int E,int K,int NC,int X,int S,int C,int T,int U,int64_t Timeout>
-__global__ __vector__ void dispatch_send_impl(
+// [REUSE+AFD] Native dispatch_impl orchestration boundary. Added parameters:
+// token_mask, task_info, context, control_buffer, round_ledger and send_status.
+// No native persistent worker/collective: keep the tiled phases below in order.
+template <int kNumRanks, int kNumExperts, int kNumTopk, int kNumVecCores,
+          int kNumHiddenBytes, int kNumSFPacks, int kNumMaxTokensPerRank, int kNumTokensPerTile,
+          int kNumUbBytes, int64_t kNumTimeoutCycles>
+__global__ __vector__ void dispatch_impl(
     __gm__ void* x,__gm__ sf_pack_t* sf,__gm__ int64_t* topk_idx,__gm__ float* topk_weights,
     __gm__ uint8_t* token_mask,__gm__ const AFDTaskInfo* task_info,
     __gm__ const AFDContextLayout* context,__gm__ void* control_buffer,
     __gm__ AFDRoundLedger* round_ledger,__gm__ void* workspace,__gm__ void* jetty_ptrs,
     __gm__ uint32_t* send_status,const int sf_token_stride,const int sf_hidden_stride) {
+    // S0 [REUSE+AFD] Init/layout, then AFD task/lane/layer validation and uniform exit.
     AscendC::InitSocState();
-    constexpr TokenLayout token_layout{X,S*2,K};
-    constexpr int M=token_layout.metadata_stride();
-    using UB=DispatchSendUB<E,N,K,T,M>;
-    static_assert(sizeof(UB)<=U && handle::HcommJetty::kNumMaxSQEBytes<=512);
+    constexpr TokenLayout token_layout{kNumHiddenBytes,kNumSFPacks*2,kNumTopk};
+    constexpr int kNumMetadataBytes=token_layout.metadata_stride();
+    using UBLayout=DispatchUBLayout<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes>;
+    static_assert(sizeof(UBLayout)<=kNumUbBytes && handle::HcommJetty::kNumMaxSQEBytes<=512);
     const int vec_core_idx=AscendC::GetBlockIdx();
-    const auto ub=reinterpret_cast<__ubuf__ UB*>(0);
+    const auto ub=reinterpret_cast<__ubuf__ UBLayout*>(0);
     const auto stage=ub->control_stage;
     const auto words=reinterpret_cast<__ubuf__ uint32_t*>(stage);
     const auto base=reinterpret_cast<__gm__ uint8_t*>(context);
@@ -281,6 +298,7 @@ __global__ __vector__ void dispatch_send_impl(
         if(vec_core_idx==0) { for(int i=0;i<8;++i)words[i]=0;words[0]=3;words[1]=AscendC::ReadGmByPassDCache(error);store_control(send_status,stage); }
         return; // all launched AIVs take this branch after the same join
     }
+    // S1 [REUSE] Per-AIV HcommJetty/peer preload; asymmetric AFD peer directory.
     const auto lane=lanes[lane_idx];
     const auto state=reinterpret_cast<__gm__ AFDSendState*>(ws+w.send_state)+lane.payload_slot_idx;
     handle::HcommJetty jetty(reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(ub->jetty_info),ub->ub_sqe,jetty_ptrs,vec_core_idx);
@@ -294,60 +312,67 @@ __global__ __vector__ void dispatch_send_impl(
     // Like native dispatch's peer_info preload, decode each peer once per AIV.
     // HcommPeer is a view of peer_info; rebinding the view below does not reload GM.
     handle::HcommPeer peer(ub->peer_info,jetty_ptrs,peers[0].peer_idx);
-    for(int f=1;f<N;++f) {
+    for(int f=1;f<kNumRanks;++f) {
         handle::HcommPeer preload_peer(ub->peer_info+f,jetty_ptrs,peers[f].peer_idx);
     }
+    // S2 [AFD] Communication rounds, bounded by this physical lane capacity.
+    // Each round: acquire slot -> route/count -> prefix -> emit/transfer -> publish.
+    // Do not hoist slot waits or publish Ready across this loop.
     uint32_t current_round=0;
     for(uint32_t round=0;round<task_info->num_comm_rounds;++round) {
         current_round=round;
+        // S2.1 [AFD] Previous input Consumed + free Ledger before slot reuse.
         const auto ledger=round_ledger+uint64_t(lane.payload_slot_idx)*2+(round%2);
         if(vec_core_idx==0) {
             load_control(stage,state);const auto previous=*reinterpret_cast<__ubuf__ AFDSendState*>(stage);
             bool ready=true;
-            if(previous.has_published) for(int f=0;f<N;++f)
-                ready=wait_control<Timeout>(stage,controls+addresses[lane_idx*N+f].consumed_offset,previous.last_input_bit)&&ready;
-            ready=wait_control<Timeout>(stage,ledger,0)&&ready;
+            if(previous.has_published) for(int f=0;f<kNumRanks;++f)
+                ready=wait_control<kNumTimeoutCycles>(stage,controls+addresses[lane_idx*kNumRanks+f].consumed_offset,previous.last_input_bit)&&ready;
+            ready=wait_control<kNumTimeoutCycles>(stage,ledger,0)&&ready;
             if(!ready) AscendC::WriteGmByPassDCache(error,uint32_t(TIMEOUT));
         }
         local_join();
         if(AscendC::ReadGmByPassDCache(error)!=OK) break;
         const uint32_t begin=uint32_t(math::min(uint64_t(task_info->num_tokens),uint64_t(round)*lane.capacity));
         const uint32_t length=math::min(lane.capacity,task_info->num_tokens-begin);
-        const uint32_t tiles=(length+T-1)/T;
-        for(uint32_t tile=vec_core_idx;tile<tiles;tile+=NC) {
-            AscendC::Simt::VF_CALL<route_tile<E,N,K,T,M,false>>(AscendC::Simt::Dim3(512,1,1),
-                ub,topk_idx,token_mask,counts+tile*(N+E),psum+tile*(N+E),eprefix,dst_slots,refs,error,
-                begin,tile*T,math::min(uint32_t(T),length-tile*T));
+        const uint32_t tiles=(length+kNumTokensPerTile-1)/kNumTokensPerTile;
+        for(uint32_t tile=vec_core_idx;tile<tiles;tile+=kNumVecCores) {
+            // S2.2 [REUSE+AFD] Warp rank dedup/histogram; AFD mask and route validation.
+            AscendC::Simt::VF_CALL<route_tile<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes,false>>(AscendC::Simt::Dim3(512,1,1),
+                ub,topk_idx,token_mask,counts+tile*(kNumRanks+kNumExperts),psum+tile*(kNumRanks+kNumExperts),eprefix,dst_slots,refs,error,
+                begin,tile*kNumTokensPerTile,math::min(uint32_t(kNumTokensPerTile),length-tile*kNumTokensPerTile));
             asc_sync_notify(PIPE_V,PIPE_S,EVENT_ID0);asc_sync_wait(PIPE_V,PIPE_S,EVENT_ID0);
         }
         local_join();
         if(AscendC::ReadGmByPassDCache(error)!=OK) break;
+        // S2.3 [REUSE+AFD] Histogram/prefix logic, now bounded tile columns rather than collective counts.
         // Independent prefix columns need no extra workspace. Only the final
         // expert-major exclusive prefix is ordered after all column totals exist.
-        for(int column=vec_core_idx;column<N+E;column+=NC) {
+        for(int column=vec_core_idx;column<kNumRanks+kNumExperts;column+=kNumVecCores) {
             uint32_t total=0;
             for(uint32_t tile=0;tile<tiles;++tile) {
-                AscendC::WriteGmByPassDCache(psum+tile*(N+E)+column,total);
-                total+=AscendC::ReadGmByPassDCache(counts+tile*(N+E)+column);
+                AscendC::WriteGmByPassDCache(psum+tile*(kNumRanks+kNumExperts)+column,total);
+                total+=AscendC::ReadGmByPassDCache(counts+tile*(kNumRanks+kNumExperts)+column);
             }
-            if(column<N) AscendC::WriteGmByPassDCache(rtotals+column,total);
-            else AscendC::WriteGmByPassDCache(ecounts+column-N,total);
+            if(column<kNumRanks) AscendC::WriteGmByPassDCache(rtotals+column,total);
+            else AscendC::WriteGmByPassDCache(ecounts+column-kNumRanks,total);
         }
         local_join();
         if(vec_core_idx==0) {
             uint32_t expert_base=0;
-            for(int expert=0;expert<E;++expert) {
+            for(int expert=0;expert<kNumExperts;++expert) {
                 AscendC::WriteGmByPassDCache(eprefix+expert,expert_base);
                 expert_base+=AscendC::ReadGmByPassDCache(ecounts+expert);
             }
         }
         local_join();
+        // S2.4 [REUSE+AFD] Second route pass and metadata/payload production per tile.
         uint32_t inflight=0;
-        for(uint32_t tile=vec_core_idx;tile<tiles;tile+=NC) {
-            const uint32_t size=math::min(uint32_t(T),length-tile*T);
-            AscendC::Simt::VF_CALL<route_tile<E,N,K,T,M,true>>(AscendC::Simt::Dim3(512,1,1),
-                ub,topk_idx,token_mask,counts+tile*(N+E),psum+tile*(N+E),eprefix,dst_slots,refs,error,
-                begin,tile*T,size);
+        for(uint32_t tile=vec_core_idx;tile<tiles;tile+=kNumVecCores) {
+            const uint32_t size=math::min(uint32_t(kNumTokensPerTile),length-tile*kNumTokensPerTile);
+            AscendC::Simt::VF_CALL<route_tile<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes,true>>(AscendC::Simt::Dim3(512,1,1),
+                ub,topk_idx,token_mask,counts+tile*(kNumRanks+kNumExperts),psum+tile*(kNumRanks+kNumExperts),eprefix,dst_slots,refs,error,
+                begin,tile*kNumTokensPerTile,size);
             asc_sync_notify(PIPE_V,PIPE_S,EVENT_ID0);asc_sync_wait(PIPE_V,PIPE_S,EVENT_ID0);
             // Native preload_metadata / batch_idx / stage_idx progression, restricted
             // to this fixed routing tile. Metadata remains in existing GM scratch
@@ -358,7 +383,7 @@ __global__ __vector__ void dispatch_send_impl(
             const int num_active_stages=math::min(num_metadata_batches,kNumMetadataMTEStages);
             for(int stage_idx=0;stage_idx<num_active_stages;++stage_idx) {
                 const auto ub_metadata=ub->metadata[stage_idx];
-                for(int b=0;b<kNumTokensPerMetadataMTE*M;++b) ub_metadata[b]=0;
+                for(int b=0;b<kNumTokensPerMetadataMTE*kNumMetadataBytes;++b) ub_metadata[b]=0;
                 const auto event=static_cast<event_t>(stage_idx+2);
                 asc_sync_notify(PIPE_S,PIPE_MTE2,event);
                 asc_sync_wait(PIPE_S,PIPE_MTE2,event);
@@ -368,32 +393,32 @@ __global__ __vector__ void dispatch_send_impl(
                 const auto ub_metadata=ub->metadata[stage_idx];
                 const auto event=static_cast<event_t>(stage_idx+2);
                 const int num_tokens_in_stage=math::min(kNumTokensPerMetadataMTE,int(size)-token_idx);
-                const uint64_t global=uint64_t(begin)+tile*T+token_idx;
+                const uint64_t global=uint64_t(begin)+tile*kNumTokensPerTile+token_idx;
                 asc_sync_wait(PIPE_MTE3,PIPE_MTE2,event);
-                if constexpr(S>0) {
+                if constexpr(kNumSFPacks>0) {
                     const auto gm_sf=sf+global*sf_token_stride;
                     if(sf_hidden_stride==1) {
                         asc_copy_gm2ub_align(reinterpret_cast<__ubuf__ sf_pack_t*>(ub_metadata),gm_sf,
-                            static_cast<uint16_t>(num_tokens_in_stage),S*sizeof(sf_pack_t),0,0,false,
+                            static_cast<uint16_t>(num_tokens_in_stage),kNumSFPacks*sizeof(sf_pack_t),0,0,false,
                             static_cast<uint8_t>(LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV),
-                            uint64_t(sf_token_stride)*sizeof(sf_pack_t),M);
+                            uint64_t(sf_token_stride)*sizeof(sf_pack_t),kNumMetadataBytes);
                     } else {
                         const nddma_desc sf_desc(
-                            nddma_desc::loop_desc(num_tokens_in_stage,M/sizeof(sf_pack_t),uint32_t(sf_token_stride)),
-                            nddma_desc::loop_desc(S,1,uint32_t(sf_hidden_stride)));
+                            nddma_desc::loop_desc(num_tokens_in_stage,kNumMetadataBytes/sizeof(sf_pack_t),uint32_t(sf_token_stride)),
+                            nddma_desc::loop_desc(kNumSFPacks,1,uint32_t(sf_hidden_stride)));
                         nddma_out_to_ub(reinterpret_cast<__ubuf__ sf_pack_t*>(ub_metadata),gm_sf,
                             0,sf_desc,0,CONSTANT_PADDING,
                             static_cast<uint8_t>(LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV));
                     }
                 }
-                asc_copy_gm2ub_align(ub_metadata+token_layout.topk_idx_offset()-X,
-                    reinterpret_cast<__gm__ uint8_t*>(topk_idx+global*K),
-                    static_cast<uint16_t>(num_tokens_in_stage),K*8,0,0,false,
-                    static_cast<uint8_t>(LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV),uint64_t(K*8),M);
-                asc_copy_gm2ub_align(ub_metadata+token_layout.topk_weights_offset()-X,
-                    reinterpret_cast<__gm__ uint8_t*>(topk_weights+global*K),
-                    static_cast<uint16_t>(num_tokens_in_stage),K*4,0,0,false,
-                    static_cast<uint8_t>(LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV),uint64_t(K*4),M);
+                asc_copy_gm2ub_align(ub_metadata+token_layout.topk_idx_offset()-kNumHiddenBytes,
+                    reinterpret_cast<__gm__ uint8_t*>(topk_idx+global*kNumTopk),
+                    static_cast<uint16_t>(num_tokens_in_stage),kNumTopk*8,0,0,false,
+                    static_cast<uint8_t>(LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV),uint64_t(kNumTopk*8),kNumMetadataBytes);
+                asc_copy_gm2ub_align(ub_metadata+token_layout.topk_weights_offset()-kNumHiddenBytes,
+                    reinterpret_cast<__gm__ uint8_t*>(topk_weights+global*kNumTopk),
+                    static_cast<uint16_t>(num_tokens_in_stage),kNumTopk*4,0,0,false,
+                    static_cast<uint8_t>(LD_L2CacheType::L2_CACHE_HINT_NORMAL_FV),uint64_t(kNumTopk*4),kNumMetadataBytes);
                 asc_sync_notify(PIPE_MTE2,PIPE_S,event);
             };
             for(int stage_idx=0;stage_idx<num_active_stages;++stage_idx)
@@ -406,17 +431,17 @@ __global__ __vector__ void dispatch_send_impl(
                 const auto ub_metadata=ub->metadata[stage_idx];
                 asc_sync_wait(PIPE_MTE2,PIPE_S,event);
                 for(int i=0;i<num_tokens_in_stage;++i) {
-                    const auto meta=ub_metadata+i*M;
-                    *reinterpret_cast<__ubuf__ uint32_t*>(meta+token_layout.src_token_idx_offset()-X)=tile*T+first_metadata_idx+i;
-                    *reinterpret_cast<__ubuf__ uint32_t*>(meta+token_layout.valid_topk_mask_offset()-X)=
-                        K==32?UINT32_MAX:(uint32_t(1)<<K)-1;
+                    const auto meta=ub_metadata+i*kNumMetadataBytes;
+                    *reinterpret_cast<__ubuf__ uint32_t*>(meta+token_layout.src_token_idx_offset()-kNumHiddenBytes)=tile*kNumTokensPerTile+first_metadata_idx+i;
+                    *reinterpret_cast<__ubuf__ uint32_t*>(meta+token_layout.valid_topk_mask_offset()-kNumHiddenBytes)=
+                        kNumTopk==32?UINT32_MAX:(uint32_t(1)<<kNumTopk)-1;
                 }
                 asc_sync_notify(PIPE_S,PIPE_MTE3,event);
                 asc_sync_wait(PIPE_S,PIPE_MTE3,event);
                 // Unlike gathered fields, completed metadata records are contiguous
                 // in both UB and GM; one burst avoids any inter-burst stride/gap.
-                const uint32_t num_metadata_bytes=num_tokens_in_stage*M;
-                asc_copy_ub2gm_align(ws+w.metadata_send_buffer+uint64_t(tile*T+first_metadata_idx)*M,
+                const uint32_t num_metadata_bytes=num_tokens_in_stage*kNumMetadataBytes;
+                asc_copy_ub2gm_align(ws+w.metadata_send_buffer+uint64_t(tile*kNumTokensPerTile+first_metadata_idx)*kNumMetadataBytes,
                     ub_metadata,1,num_metadata_bytes,
                     asc_store_l2_cache_mode::NOTALLOC_CLEAN,uint64_t(num_metadata_bytes),num_metadata_bytes);
                 asc_sync_notify(PIPE_MTE3,PIPE_MTE2,event);
@@ -429,49 +454,53 @@ __global__ __vector__ void dispatch_send_impl(
                 asc_sync_wait(PIPE_MTE3,PIPE_MTE2,static_cast<event_t>(stage_idx+2));
             asc_sync_notify(PIPE_MTE2,PIPE_S,EVENT_ID0);
             asc_sync_wait(PIPE_MTE2,PIPE_S,EVENT_ID0);
+            // S2.4b [REUSE+AFD] Native combine warp-per-WQE encoding, AFD record SGEs.
+            // All metadata MTE3 reads/writes above must finish before SQ publication.
             uint32_t num_task_tokens=0;
             for(uint32_t i=0;i<size;++i) {
-                const uint32_t row=tile*T+i,global=begin+row;
-                const auto gm_meta=ws+w.metadata_send_buffer+uint64_t(row)*M;
-                for(int k=0;k<K;++k) {
-                    const int f=ub->dst_rank_idx[i*K+k];if(f<0)continue;
+                const uint32_t row=tile*kNumTokensPerTile+i,global=begin+row;
+                const auto gm_meta=ws+w.metadata_send_buffer+uint64_t(row)*kNumMetadataBytes;
+                for(int k=0;k<kNumTopk;++k) {
+                    const int f=ub->dst_rank_idx[i*kNumTopk+k];if(f<0)continue;
                     peer.peer_info=ub->peer_info+f;
-                    const uint64_t off=addresses[lane_idx*N+f].records_offset+uint64_t(ub->dst_slot_idx[i*K+k])*token_layout.record_stride();
-                    append_write_task<2,Timeout>(jetty,peer,off,
-                        static_cast<__gm__ uint8_t*>(x)+uint64_t(global)*X,gm_meta,X,M,num_task_tokens,inflight);
+                    const uint64_t off=addresses[lane_idx*kNumRanks+f].records_offset+uint64_t(ub->dst_slot_idx[i*kNumTopk+k])*token_layout.record_stride();
+                    append_write_task<2,kNumTimeoutCycles>(jetty,peer,off,
+                        static_cast<__gm__ uint8_t*>(x)+uint64_t(global)*kNumHiddenBytes,gm_meta,kNumHiddenBytes,kNumMetadataBytes,num_task_tokens,inflight);
                 }
             }
-            issue_write_task<2,Timeout>(jetty,num_task_tokens,inflight);
-            flush_writes<Timeout>(jetty,inflight);
+            issue_write_task<2,kNumTimeoutCycles>(jetty,num_task_tokens,inflight);
+            flush_writes<kNumTimeoutCycles>(jetty,inflight);
         }
         local_join();
         if(AscendC::ReadGmByPassDCache(error)!=OK) break;
         if(vec_core_idx==0) {
+            // S2.5 [AFD] After all AIV payload drains: route tables -> Inbox ->
+            // Ledger -> InputReady -> next bits. No early InputReady/slot release.
             uint64_t route_base=0;
-            for(int f=0;f<N;++f) {
+            for(int f=0;f<kNumRanks;++f) {
                 uint32_t routes=0;
-                for(int e=0;e<E/N;++e) {
-                    routes+=AscendC::ReadGmByPassDCache(ecounts+f*(E/N)+e);
-                    AscendC::WriteGmByPassDCache(eprefix+f*(E/N)+e,routes);
+                for(int e=0;e<kNumExperts/kNumRanks;++e) {
+                    routes+=AscendC::ReadGmByPassDCache(ecounts+f*(kNumExperts/kNumRanks)+e);
+                    AscendC::WriteGmByPassDCache(eprefix+f*(kNumExperts/kNumRanks)+e,routes);
                 }
                 AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
                 peer.peer_info=ub->peer_info+f;
-                const auto address=addresses[lane_idx*N+f];
-                if(routes)put_at_offset<Timeout>(jetty,peer,address.route_reference_offset,refs+route_base,uint64_t(routes)*4,inflight);
-                put_at_offset<Timeout>(jetty,peer,address.count_offset,ecounts+f*(E/N),(E/N)*4,inflight);
-                put_at_offset<Timeout>(jetty,peer,address.prefix_offset,eprefix+f*(E/N),(E/N)*4,inflight);
+                const auto address=addresses[lane_idx*kNumRanks+f];
+                if(routes)put_at_offset<kNumTimeoutCycles>(jetty,peer,address.route_reference_offset,refs+route_base,uint64_t(routes)*4,inflight);
+                put_at_offset<kNumTimeoutCycles>(jetty,peer,address.count_offset,ecounts+f*(kNumExperts/kNumRanks),(kNumExperts/kNumRanks)*4,inflight);
+                put_at_offset<kNumTimeoutCycles>(jetty,peer,address.prefix_offset,eprefix+f*(kNumExperts/kNumRanks),(kNumExperts/kNumRanks)*4,inflight);
                 route_base+=routes;
             }
-            flush_writes<Timeout>(jetty,inflight);
+            flush_writes<kNumTimeoutCycles>(jetty,inflight);
             load_control(stage,state);const AFDSendState saved=*reinterpret_cast<__ubuf__ AFDSendState*>(stage);
-            for(int f=0;f<N;++f) {
+            for(int f=0;f<kNumRanks;++f) {
                 for(int i=0;i<16;++i)words[i]=0;
                 auto inbox=reinterpret_cast<__ubuf__ AFDInbox*>(stage);
                 inbox->microbatch_idx=task_info->microbatch_idx;inbox->layer_idx=task_info->layer_idx;
                 inbox->round_idx=round;inbox->num_comm_rounds=task_info->num_comm_rounds;
                 inbox->num_round_tokens=length;inbox->return_bit=saved.next_return_bit;
                 inbox->num_recv_records=AscendC::ReadGmByPassDCache(rtotals+f);
-                store_control(reinterpret_cast<__gm__ void*>(peers[f].control_base+addresses[lane_idx*N+f].inbox_offset),stage,64);
+                store_control(reinterpret_cast<__gm__ void*>(peers[f].control_base+addresses[lane_idx*kNumRanks+f].inbox_offset),stage,64);
             }
             for(int i=0;i<16;++i)words[i]=0;
             auto out=reinterpret_cast<__ubuf__ AFDRoundLedger*>(stage);
@@ -479,9 +508,9 @@ __global__ __vector__ void dispatch_send_impl(
             out->token_begin=begin;out->num_round_tokens=length;out->final_round=round+1==task_info->num_comm_rounds;
             out->microbatch_idx=task_info->microbatch_idx;
             store_control(ledger,stage,64);words[0]=1;store_control(ledger,stage);
-            for(int f=0;f<N;++f) {
+            for(int f=0;f<kNumRanks;++f) {
                 for(int i=0;i<8;++i)words[i]=0;words[0]=saved.next_input_bit;
-                store_control(reinterpret_cast<__gm__ void*>(peers[f].control_base+addresses[lane_idx*N+f].input_ready_offset),stage);
+                store_control(reinterpret_cast<__gm__ void*>(peers[f].control_base+addresses[lane_idx*kNumRanks+f].input_ready_offset),stage);
             }
             for(int i=0;i<8;++i)words[i]=0;
             auto next=reinterpret_cast<__ubuf__ AFDSendState*>(stage);
@@ -491,6 +520,7 @@ __global__ __vector__ void dispatch_send_impl(
         local_join();
     }
     if(vec_core_idx==0) {
+        // S3 [AFD] Publication status only, not permission to reuse the input slot.
         const uint32_t code=AscendC::ReadGmByPassDCache(error);
         for(int i=0;i<8;++i)words[i]=0;words[0]=code==OK?2:3;words[1]=code;
         words[2]=current_round;store_control(send_status,stage);

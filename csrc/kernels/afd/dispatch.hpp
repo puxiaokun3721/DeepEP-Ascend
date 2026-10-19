@@ -14,7 +14,7 @@ static void launch_dispatch_send(void* x, void* sf, void* topk_idx, void* topk_w
 #include <deep_ep/impls/afd/dispatch_send.hpp>
 using namespace deep_ep::afd;
 static void __instantiate_kernel() {{
-    auto ptr=reinterpret_cast<void*>(&dispatch_send_impl<{},{},{},{},{},{},{},{},{},{}>);
+    auto ptr=reinterpret_cast<void*>(&deep_ep::afd::dispatch_impl<{},{},{},{},{},{},{},{},{},{}>);
 }}
 )",config.num_ranks,config.num_experts,config.num_topk,config.num_vec_cores,
         config.num_hidden_bytes,config.num_sf_packs,config.num_max_tokens_per_rank,
@@ -32,7 +32,7 @@ static void launch_dispatch_recv(void* buffer,void* context,void* active,void* e
 #include <deep_ep/impls/afd/dispatch_recv.hpp>
 using namespace deep_ep::afd;
 static void __instantiate_kernel() {{
-    auto ptr=reinterpret_cast<void*>(&dispatch_recv_impl<{},{},{},{},{},{},{},{},{},{},{},{},{}>);
+    auto ptr=reinterpret_cast<void*>(&deep_ep::afd::dispatch_copy_epilogue_impl<{},{},{},{},{},{},{},{},{},{},{},{},{}>);
 }}
 )",config.num_ranks,config.num_experts,config.num_topk,config.num_vec_cores,
         config.num_hidden_bytes,config.num_sf_packs,config.num_source_lanes,config.num_layers,
