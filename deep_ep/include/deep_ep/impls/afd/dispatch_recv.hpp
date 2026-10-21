@@ -58,6 +58,58 @@ __aicore__ inline Value recv_read(__gm__ const Value* source) {
         output[i]=AscendC::ReadGmByPassDCache(input+i);
     return value;
 }
+// [AFD] Validate arbitrary Segment order without pairwise interval scans. Only
+// uint32 indices are sorted; Active and payload stay immutable. Two bounded GM
+// arrays replace O(S^2) comparisons with O(S log S), without a hidden mirror.
+// Batched MTE3 stores finish before the next merge pass reads its indices, so
+// this helper adds no scalar GM store/cache-coherence assumption.
+template <bool kByDestination>
+__aicore__ inline bool recv_segment_less(__gm__ const AFDActiveSegment* segments,uint32_t lhs,uint32_t rhs) {
+    const auto a=recv_read(segments+lhs),b=recv_read(segments+rhs);
+    if constexpr(!kByDestination)if(a.source_lane_idx!=b.source_lane_idx)return a.source_lane_idx<b.source_lane_idx;
+    if(a.local_expert_idx!=b.local_expert_idx)return a.local_expert_idx<b.local_expert_idx;
+    const uint32_t a_begin=kByDestination?a.dst_row_begin:a.route_begin;
+    const uint32_t b_begin=kByDestination?b.dst_row_begin:b.route_begin;
+    return a_begin!=b_begin?a_begin<b_begin:lhs<rhs;
+}
+// [AFD] Sort only current-piece indices, using existing exact-range MTE stores.
+// No native full-transaction histogram or hidden workspace is introduced.
+template <bool kByDestination>
+__aicore__ inline __gm__ uint32_t* recv_sort_segments(__gm__ const AFDActiveSegment* segments,
+    __gm__ uint32_t* index,__gm__ uint32_t* scratch,uint32_t size,__ubuf__ uint8_t* tmp) {
+    constexpr uint32_t kNumIndicesPerTransfer=32;
+    auto indices=reinterpret_cast<__ubuf__ uint32_t*>(tmp);
+    for(uint32_t begin=0;begin<size;begin+=kNumIndicesPerTransfer) {
+        const uint32_t count=size-begin<kNumIndicesPerTransfer?size-begin:kNumIndicesPerTransfer;
+        for(uint32_t i=0;i<count;++i)indices[i]=begin+i;
+        recv_store(index+begin,tmp,4*count);
+    }
+    for(uint64_t width=1;width<size;width*=2) {
+        uint32_t output=0,buffered=0;
+        for(uint64_t begin=0;begin<size;begin+=2*width) {
+            const uint32_t middle=begin+width<size?begin+width:size;
+            const uint32_t end=begin+2*width<size?begin+2*width:size;
+            uint32_t left=begin,right=middle;
+            while(left<middle || right<end) {
+                uint32_t next;
+                if(left==middle)next=recv_read(index+right++);
+                else if(right==end)next=recv_read(index+left++);
+                else {
+                    const uint32_t lhs=recv_read(index+left),rhs=recv_read(index+right);
+                    if(recv_segment_less<kByDestination>(segments,lhs,rhs)) {next=lhs;++left;}
+                    else {next=rhs;++right;}
+                }
+                indices[buffered++]=next;
+                if(buffered==kNumIndicesPerTransfer) {
+                    recv_store(scratch+output,tmp,4*buffered);output+=buffered;buffered=0;
+                }
+            }
+        }
+        if(buffered)recv_store(scratch+output,tmp,4*buffered);
+        auto previous=index;index=scratch;scratch=previous;
+    }
+    return index;
+}
 // [REUSE+AFD] Native token/metadata stages; bounded AFD refs and control scratch.
 template <int kNumTokenBytes, int kNumTokensPerStage> struct alignas(32) DispatchCopyEpilogueUBLayout {
     alignas(32) uint8_t token[2][kNumTokenBytes*kNumTokensPerStage];
@@ -121,7 +173,8 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
             if(error==OK && (task.entries_offset!=active_entries_offset() ||
                task.members_offset!=active_members_offset(kNumSourceLanes) || task.segments_offset!=active_segments_offset(kNumSourceLanes) ||
                task.num_entries==0 || task.num_entries>kNumSourceLanes || task.num_members>kNumSourceLanes ||
-               task.num_segments>uint64_t(kNumSourceLanes)*kNumExpertsPerRank || task.num_expanded_tokens>kMaxExpandedTokens || task.num_padded_tokens>kMaxPaddedTokens)) error=CAPACITY;
+               task.num_segments>uint64_t(kNumSourceLanes)*kNumExpertsPerRank || task.num_segments>task.num_expanded_tokens ||
+               task.num_expanded_tokens>kMaxExpandedTokens || task.num_padded_tokens>kMaxPaddedTokens)) error=CAPACITY;
         }
         // R1 [AFD] Directory/Entry/Member/Segment preflight, before any output.
         // Do not form any untrusted table pointer until the directory is checked.
@@ -215,13 +268,6 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
                     auto prefix=reinterpret_cast<__gm__ const uint32_t*>(reinterpret_cast<__gm__ uint8_t*>(buffer)+address.prefix_offset);
                     const uint64_t begin=segment.local_expert_idx==0?0:recv_read(prefix+(segment.local_expert_idx-1)),end=recv_read(prefix+(segment.local_expert_idx));
                     if(segment.route_begin<begin || segment.route_begin>end || segment.num_routes>end-segment.route_begin) {error=BAD_ROUTE;break;}
-                    // The same input route cannot appear twice, even at different output rows.
-                    for(uint32_t k=0;k<j;++k) {
-                        const auto other=recv_read(segments+(k));
-                        if(other.source_lane_idx==segment.source_lane_idx && other.local_expert_idx==segment.local_expert_idx &&
-                           uint64_t(segment.route_begin)<uint64_t(other.route_begin)+other.num_routes &&
-                           uint64_t(other.route_begin)<uint64_t(segment.route_begin)+segment.num_routes)error=BAD_ROUTE;
-                    }
                     rows+=segment.num_routes;
                 }
                 if(error==OK && rows!=entry.num_rows)error=BAD_TASK;
@@ -229,25 +275,41 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
             }
             if(error==OK && (next_member!=task.num_members || next_segment!=task.num_segments || total!=task.num_expanded_tokens))error=BAD_TASK;
             if(error==OK && ((task.kind==WORK && total==0) || (task.kind==CONTROL && (total || task.num_segments || task.num_padded_tokens))))error=BAD_TASK;
-            uint64_t physical=0;
-            // Repeated table scans bound scratch to the current computation piece.
-            for(int e=0;e<kNumExpertsPerRank && error==OK;++e) {
-                uint64_t count=0;for(uint32_t j=0;j<task.num_segments;++j)if(recv_read(segments+(j)).local_expert_idx==e)count+=recv_read(segments+(j)).num_routes;
-                const uint64_t padded=(count+kExpertAlignment-1)/kExpertAlignment*kExpertAlignment;
-                if(physical>kMaxPaddedTokens || padded>kMaxPaddedTokens-physical) {error=CAPACITY;break;}
+            // All Segment addresses/counts are checked before sorting. The
+            // first order detects duplicate input intervals; the second proves
+            // exact dense expert output intervals, including holes/overlaps.
+            // Only this core accesses the indices; output remains untouched.
+            if(error==OK) {
+                auto index=reinterpret_cast<__gm__ uint32_t*>(ws+recv_workspace_bytes(kNumVecCores));
+                auto scratch=reinterpret_cast<__gm__ uint32_t*>(reinterpret_cast<__gm__ uint8_t*>(index)+
+                    recv_segment_index_bytes(kNumSourceLanes,kNumExpertsPerRank,kMaxExpandedTokens));
+                auto ordered=recv_sort_segments<false>(segments,index,scratch,task.num_segments,tmp);
+                AFDActiveSegment previous{};
                 for(uint32_t j=0;j<task.num_segments && error==OK;++j) {
-                    const auto segment=recv_read(segments+(j));if(segment.local_expert_idx!=e)continue;
-                    if(segment.dst_row_begin<physical || segment.dst_row_begin>physical+count ||
-                       segment.num_routes>physical+count-segment.dst_row_begin) {error=BAD_TASK;break;}
-                    for(uint32_t k=0;k<j;++k) {
-                        const auto other=recv_read(segments+(k));
-                        if(uint64_t(segment.dst_row_begin)<uint64_t(other.dst_row_begin)+other.num_routes &&
-                           uint64_t(other.dst_row_begin)<uint64_t(segment.dst_row_begin)+segment.num_routes)error=BAD_TASK;
-                    }
+                    const auto segment=recv_read(segments+recv_read(ordered+j));
+                    if(j && previous.source_lane_idx==segment.source_lane_idx && previous.local_expert_idx==segment.local_expert_idx &&
+                       uint64_t(segment.route_begin)<uint64_t(previous.route_begin)+previous.num_routes)error=BAD_ROUTE;
+                    previous=segment;
                 }
-                physical+=padded;
+                if(error==OK) {
+                    ordered=recv_sort_segments<true>(segments,index,scratch,task.num_segments,tmp);
+                    uint64_t physical=0;
+                    uint32_t next=0;
+                    for(int e=0;e<kNumExpertsPerRank && error==OK;++e) {
+                        uint64_t count=0;
+                        while(next<task.num_segments) {
+                            const auto segment=recv_read(segments+recv_read(ordered+next));
+                            if(segment.local_expert_idx!=e)break;
+                            if(segment.dst_row_begin!=physical+count) {error=BAD_TASK;break;}
+                            count+=segment.num_routes;++next;
+                        }
+                        const uint64_t padded=(count+kExpertAlignment-1)/kExpertAlignment*kExpertAlignment;
+                        if(physical>kMaxPaddedTokens || padded>kMaxPaddedTokens-physical) {error=CAPACITY;break;}
+                        physical+=padded;
+                    }
+                    if(error==OK && (next!=task.num_segments || physical!=task.num_padded_tokens))error=BAD_TASK;
+                }
             }
-            if(error==OK && physical!=task.num_padded_tokens)error=BAD_TASK;
 
         }
         for(int i=0;i<8;++i)words[i]=0;
@@ -368,12 +430,13 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
                     }
                     asc_sync_notify(PIPE_S,PIPE_MTE3,static_cast<event_t>(4+stage_idx));
                     asc_sync_wait(PIPE_S,PIPE_MTE3,static_cast<event_t>(4+stage_idx));
-                    // One DMA per COLUMN TILE, not one DMA per token/pack.
-                    // A one-block native copy avoids SDK-specific stride/gap interpretations.
-                    for(int p=0;p<columns;++p)
-                        asc_copy_ub2gm_align(recv_sf+uint64_t(row)*recv_sf_token_stride+uint64_t(sf_begin+p)*recv_sf_hidden_stride,
-                            reinterpret_cast<__ubuf__ int16_t*>(ub->token[stage_idx]+32*p),
-                            1,2*num_stage_tokens,store_cache,uint64_t(2*num_stage_tokens),32);
+                    // 950 C API strides are head-to-head BYTES, not the C++
+                    // DataCopyPad gap/32B-unit fields. One multi-burst transfer
+                    // emits the whole UB column block, retaining 32B UB sources.
+                    // Host validation guarantees column-major token stride == 1.
+                    asc_copy_ub2gm_align(recv_sf+uint64_t(row)*recv_sf_token_stride+uint64_t(sf_begin)*recv_sf_hidden_stride,
+                        reinterpret_cast<__ubuf__ int16_t*>(ub->token[stage_idx]),
+                        columns,2*num_stage_tokens,store_cache,uint64_t(2)*recv_sf_hidden_stride,32);
                     asc_sync_notify(PIPE_MTE3,PIPE_S,static_cast<event_t>(4+stage_idx));
                     asc_sync_wait(PIPE_MTE3,PIPE_S,static_cast<event_t>(4+stage_idx));
                 }

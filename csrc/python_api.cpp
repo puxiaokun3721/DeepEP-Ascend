@@ -58,7 +58,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_property_readonly("recv_src_metadata",&AFDBuffer::recv_src_metadata)
         .def("dispatchRecv",&AFDBuffer::dispatchRecv)
         .def("prepare_ffn",&AFDBuffer::prepare_ffn,py::arg("precheck")=false)
-        .def("prepare_combine_recv",&AFDBuffer::prepare_combine_recv)
+        .def("prepare_combine_recv",&AFDBuffer::prepare_combine_recv,py::arg("round_step")=false,
+             py::arg("fair_round_robin")=false)
         .def_property_readonly("scheduler_workspace",&AFDBuffer::scheduler_workspace)
         .def_property_readonly("completion",&AFDBuffer::completion)
         .def_property_readonly("psum_num_recv_tokens_per_expert",&AFDBuffer::psum_num_recv_tokens_per_expert)
@@ -67,10 +68,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_property_readonly("combine_send_workspace",&AFDBuffer::combine_send_workspace)
         .def_property_readonly("combine_recv_workspace",&AFDBuffer::combine_recv_workspace)
         .def_property_readonly("recv_status",&AFDBuffer::recv_status)
+        .def_property_readonly("combine_recv_progress",&AFDBuffer::combine_recv_progress)
         .def("ffnScheduler",&AFDBuffer::ffnScheduler)
         .def("computeReady",&AFDBuffer::computeReady)
         .def("combineSend",&AFDBuffer::combineSend)
-        .def("combineRecv",&AFDBuffer::combineRecv);
+        .def("combineRecv",&AFDBuffer::combineRecv,py::arg("combined_topk_idx"),py::arg("topk_weights"),
+             py::arg("token_mask"),py::arg("task_info"),py::arg("context"),py::arg("buffer"),
+             py::arg("control_buffer"),py::arg("round_ledger"),py::arg("workspace"),
+             py::arg("combined_x"),py::arg("recv_status"),py::arg("start")=false);
     // ### PATCH END: AFD owner and unchanged dispatchSend Tensor signature
 
     py::class_<EPBuffer, BufferBase>(m, "EPBuffer")

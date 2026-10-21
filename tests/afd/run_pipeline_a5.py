@@ -5,6 +5,7 @@ Uses real scheduler/ACK/credit. Identity experts replace GMM numerics, not proto
 Host reads are intentional bring-up diagnostics: this is NOT a graph/performance test.
 """
 import argparse
+from dataclasses import dataclass
 from datetime import timedelta
 import json
 import os
@@ -23,6 +24,25 @@ def bytes_cpu(tensor):
     return tensor.cpu().numpy().tobytes()
 
 
+@dataclass
+class SourceTask:
+    x_cpu: torch.Tensor
+    mask_cpu: torch.Tensor
+    x: torch.Tensor
+    idx: torch.Tensor
+    weights: torch.Tensor
+    mask: torch.Tensor
+    task: torch.Tensor
+    output: torch.Tensor
+
+
+def receive(owner, source_task, *, start=False):
+    owner.combineRecv(source_task.idx, source_task.weights, source_task.mask,
+        source_task.task, owner.context, owner.payload, owner.control_buffer,
+        owner.round_ledger, owner.combine_recv_workspace, source_task.output,
+        owner.recv_status, start=start)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--batch', type=int, default=41)
@@ -31,13 +51,21 @@ def main():
     parser.add_argument('--short-second', type=int)
     parser.add_argument('--precheck', action='store_true')
     parser.add_argument('--all-masked', action='store_true')
+    parser.add_argument('--microbatches', type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument('--round-step', action='store_true')
+    parser.add_argument('--timeout-seconds', type=int, default=600)
+    parser.add_argument('--max-sweeps', type=int, default=100000)
     args = parser.parse_args()
     if args.batch < 0 or not 1 <= args.window <= 32768 or args.q < 1:
         parser.error('batch >= 0, window in [1,32768], q > 0 required')
     if args.short_second is not None and not 0 <= args.short_second <= args.batch:
         parser.error('short-second must be within [0,batch]')
+    if args.timeout_seconds <= 0 or args.max_sweeps <= 0:
+        parser.error('timeout-seconds and max-sweeps must be positive')
+    if args.microbatches > 1 and args.batch > args.window and not args.round_step:
+        parser.error('multiple slots with multiple rounds require --round-step')
     torch.npu.set_device(int(os.environ['LOCAL_RANK']))
-    dist.init_process_group('hccl', timeout=timedelta(seconds=600))
+    dist.init_process_group('hccl', timeout=timedelta(seconds=args.timeout_seconds))
     rank, world = dist.get_rank(), dist.get_world_size()
     if world not in (2, 4):
         raise ValueError('2 ranks = one A/one F; 4 ranks = two A/two F')
@@ -51,51 +79,90 @@ def main():
     experts = 2 * len(receivers)
     group_name = get_hccl_group_name(dist.distributed_c10d._get_default_group(), rank)
     owner = deep_ep.AFDBuffer(rank, group_name, sources, receivers,
-        [[a, 0, 0, a, 0, args.window] for a in sources], [0],
-        hidden, 0, k, experts, capacity, False, 1, 120, 600,
+        [[a, mb, 0, a, 0, args.window] for a in sources for mb in range(args.microbatches)], [0],
+        hidden, 0, k, experts, capacity, False, 1, 120, args.timeout_seconds,
         12*1024**3, 256*1024**2)
     if rank in sources:
-        owner.prepare_combine_recv()
-        # Exactly representable BF16 and weights make the identity oracle bit-exact.
-        x_cpu = (torch.arange(capacity*hidden).reshape(capacity, hidden) % 17).to(torch.bfloat16)
-        x = x_cpu.npu()
-        idx = torch.tensor([0, 1], dtype=torch.int64).repeat(capacity, 1).npu()
-        weights = torch.full((capacity, k), 0.5, dtype=torch.float32).npu()
-        mask_cpu = torch.arange(capacity) % 5 != 0
-        if args.all_masked:
-            mask_cpu[:] = False
-        mask = mask_cpu.npu()
-        task = torch.from_numpy(np.frombuffer(struct.pack('<16I',
-            1, rank, 0, 0, 0, lengths[rank], rounds, *([0]*9)), dtype=np.uint8).copy()).npu()
-        output = torch.full_like(x, -7)
+        owner.prepare_combine_recv(round_step=args.round_step, fair_round_robin=args.round_step)
+        source_tasks = []
+        for mb in range(args.microbatches):
+            # Different, exactly representable BF16 data detects cross-slot output confusion.
+            x_cpu = ((torch.arange(capacity*hidden).reshape(capacity, hidden) + 3*mb + rank) % 17).to(torch.bfloat16)
+            x = x_cpu.npu()
+            idx = torch.tensor([0, 1], dtype=torch.int64).repeat(capacity, 1).npu()
+            weights = torch.full((capacity, k), 0.5, dtype=torch.float32).npu()
+            mask_cpu = torch.arange(capacity) % 5 != 0
+            if args.all_masked:
+                mask_cpu[:] = False
+            mask = mask_cpu.npu()
+            task = torch.from_numpy(np.frombuffer(struct.pack('<16I',
+                1, rank, mb, mb, 0, lengths[rank], rounds, *([0]*9)), dtype=np.uint8).copy()).npu()
+            source_tasks.append(SourceTask(x_cpu, mask_cpu, x, idx, weights, mask, task, torch.full_like(x, -7)))
         send_stream, recv_stream = torch.npu.Stream(), torch.npu.Stream()
+        send_complete = torch.npu.Event()
+        send_results = [torch.empty_like(owner.send_status) for _ in source_tasks]
     else:
         owner.prepare_recv(args.q, args.q, 1)
         owner.prepare_ffn(args.precheck)
     torch.npu.synchronize()
     dist.barrier()
+    sweeps = 0
     if rank in sources:
+        # One send stream owns the shared scratch; copy tiny statuses into preallocated
+        # buffers after each Epub. No allocation or host wait goes behind a live send.
         with torch.npu.stream(send_stream):
-            owner.dispatchSend(x, None, idx, weights, mask, task, owner.context,
-                owner.control_buffer, owner.round_ledger, owner.workspace, owner.send_status)
+            for source_task, send_result in zip(source_tasks, send_results):
+                owner.dispatchSend(source_task.x, None, source_task.idx, source_task.weights,
+                    source_task.mask, source_task.task, owner.context, owner.control_buffer,
+                    owner.round_ledger, owner.workspace, owner.send_status)
+                send_result.copy_(owner.send_status)
+            send_complete.record(send_stream)
         with torch.npu.stream(recv_stream):
-            owner.combineRecv(idx, weights, mask, task, owner.context, owner.payload,
-                owner.control_buffer, owner.round_ledger, owner.combine_recv_workspace, output, owner.recv_status)
-        torch.npu.synchronize()
-        assert owner.send_status.cpu().tolist()[:2] == [2, 0]
-        assert owner.recv_status.cpu().tolist()[:2] == [2, 0]
-        expected = x_cpu.clone()
-        expected[~mask_cpu] = 0
-        b = lengths[rank]
-        actual = output.cpu()
-        assert torch.equal(actual[:b], expected[:b]), 'weighted return mismatch'
-        assert torch.all(actual[b:] == -7), 'capacity tail modified'
+            if args.round_step:
+                # Initialization executes exactly once for this transaction set.
+                for source_task in source_tasks:
+                    receive(owner, source_task, start=True)
+                deadline = time.monotonic() + args.timeout_seconds
+                while True:
+                    # Host observation is queued on recv_stream, never behind the live send.
+                    # This is deliberately bring-up code, not a graph/performance loop.
+                    progress = bytes_cpu(owner.combine_recv_progress)
+                    states = [struct.unpack_from('<4I', progress, 96*mb+64)
+                              for mb in range(args.microbatches)]
+                    if any(state == 4 for state, _, _, _ in states):
+                        raise RuntimeError(f'combineRecv round-step failed: {states}')
+                    if all(state == 3 for state, _, _, _ in states):
+                        break
+                    if time.monotonic() > deadline or sweeps >= args.max_sweeps:
+                        raise TimeoutError(f'fair return sweep did not close all slots: {states}, sweeps={sweeps}')
+                    for source_task in source_tasks:
+                        receive(owner, source_task, start=False)
+                    sweeps += 1
+            else:
+                # The parser and device admission forbid unsafe multi-slot/multi-round use.
+                for source_task in source_tasks:
+                    receive(owner, source_task)
+                    status = owner.recv_status.cpu().tolist()
+                    assert status[:2] == [2, 0], f'combineRecv failed: {status}'
+            # The last recv-stream copy/event and Epub must both finish before Etxn reuse.
+            recv_stream.synchronize()
+        send_complete.synchronize()
+        with torch.npu.stream(recv_stream):
+            for mb, (source_task, result) in enumerate(zip(source_tasks, send_results)):
+                assert result.cpu().tolist()[:2] == [2, 0], f'dispatchSend failed for microbatch {mb}'
+                expected = source_task.x_cpu.clone()
+                expected[~source_task.mask_cpu] = 0
+                b = lengths[rank]
+                actual = source_task.output.cpu()
+                assert torch.equal(actual[:b], expected[:b]), f'weighted return mismatch for microbatch {mb}'
+                assert torch.all(actual[b:] == -7), f'capacity tail modified for microbatch {mb}'
     else:
         finished = 0
-        deadline = time.monotonic() + 600
-        while finished < rounds:
+        deadline = time.monotonic() + args.timeout_seconds
+        expected_finished = rounds * args.microbatches
+        while finished < expected_finished:
             if time.monotonic() > deadline:
-                raise TimeoutError('scheduler did not finish all DP rounds')
+                raise TimeoutError(f'scheduler completed {finished}/{expected_finished} DP round entries')
             owner.ffnScheduler(owner.context, owner.control_buffer, owner.scheduler_workspace,
                 owner.active, owner.execution_state, owner.completion,
                 owner.psum_num_recv_tokens_per_expert, owner.num_unaligned_recv_tokens_per_expert)
@@ -117,6 +184,7 @@ def main():
             state, error, entries = struct.unpack_from('<3I', completed)
             assert state == 2 and error == 0, 'combineSend did not commit'
             finished += sum(struct.unpack_from('<8I', completed, 32+32*i)[6] for i in range(entries))
+        assert finished == expected_finished, 'scheduler completed duplicate DP round entries'
         # Apply last Completion exactly once, retiring the old Pending state.
         owner.ffnScheduler(owner.context, owner.control_buffer, owner.scheduler_workspace,
             owner.active, owner.execution_state, owner.completion,
@@ -125,7 +193,8 @@ def main():
     dist.barrier()
     if rank == 0:
         print(json.dumps(dict(status='PASS', scope='actual five operators, identity experts, no graph',
-            lengths=lengths, window=args.window, rounds=rounds, q=args.q, precheck=args.precheck)))
+            lengths=lengths, window=args.window, rounds=rounds, q=args.q, precheck=args.precheck,
+            microbatches=args.microbatches, round_step=args.round_step, sweeps_on_rank0=sweeps)))
     owner.destroy()
     dist.barrier()
     dist.destroy_process_group()

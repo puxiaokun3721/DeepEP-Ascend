@@ -43,7 +43,8 @@ def indexed_ready(lanes, precheck=False):
                    if other.task is not None and (other.dp, other.phase, other.task) == key]
         if matches[0] != i:
             continue
-        if len(matches) == required[i] and (not precheck or all(lanes[j].credit or lanes[j].held for j in matches)):
+        has_routes = any(sum(lanes[j].counts) > sum(lanes[j].consumed) for j in matches)
+        if len(matches) == required[i] and ((not precheck and has_routes) or all(lanes[j].credit or lanes[j].held for j in matches)):
             ready.append(tuple(matches))
     return ready
 
@@ -75,7 +76,8 @@ class Scheduler:
                 raise ValueError('duplicate member')
             if set(members) != required:
                 continue
-            if self.precheck and not all(self.lanes[i].credit or self.lanes[i].held for i in indices):
+            has_routes = any(sum(self.lanes[i].counts) > sum(self.lanes[i].consumed) for i in indices)
+            if (self.precheck or not has_routes) and not all(self.lanes[i].credit or self.lanes[i].held for i in indices):
                 continue
             ready.append((phase, task[1], min(self.lanes[i].age for i in indices), indices))
         if not ready:
@@ -178,6 +180,45 @@ class SchedulerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.complete()
 
+    def test_zero_route_waits_all_member_credits_in_both_modes(self):
+        for precheck in (False, True):
+            for bit in (0, 1):
+                s = Scheduler([Lane(0, 0, expected=bit), Lane(0, 1, expected=bit, credit=False),
+                               Lane(1, 0)], 8, 8, precheck=precheck)
+                for i in (0, 1):
+                    s.publish(i, (0, 1, 0, 1), [0, 0], bit=bit, age=0)
+                s.publish(2, (0, 1, 0, 1), [3, 0], age=1)
+                entries, _ = s.select()
+                self.assertEqual([list(delta) for delta, _ in entries], [[2]])
+                s.complete()
+                self.assertIsNone(s.select())
+                self.assertEqual([s.lanes[i].expected for i in (0, 1)], [bit, bit])
+                s.lanes[1].credit = True
+                entries, rows = s.select()
+                self.assertEqual(rows, [0, 0])
+                self.assertEqual(list(entries[0][0]), [0, 1])
+                s.complete()
+                self.assertEqual([s.lanes[i].expected for i in (0, 1)], [bit ^ 1, bit ^ 1])
+
+    def test_zero_member_in_work_entry_preserves_compute_ahead(self):
+        s = Scheduler([Lane(0, 0, credit=False), Lane(0, 1, credit=False)], 8, 8)
+        s.publish(0, (0, 1, 0, 1), [0])
+        s.publish(1, (0, 1, 0, 1), [12])
+        self.assertEqual(s.select()[1], [8])
+        # Completion models the later combineSend after it actually obtains credit.
+        s.complete()
+        self.assertTrue(all(lane.held for lane in s.lanes))
+        s.precheck = True
+        self.assertEqual(s.select()[1], [4])
+
+    def test_blocked_zero_entry_is_not_aggregated_into_work(self):
+        s = Scheduler([Lane(0, 0), Lane(1, 0, credit=False)], 8, 8)
+        s.publish(0, (0, 1, 0, 1), [3], age=0)
+        s.publish(1, (0, 1, 0, 1), [0], age=1)
+        entries, rows = s.select()
+        self.assertEqual(rows, [3])
+        self.assertEqual([list(delta) for delta, _ in entries], [[0]])
+
     def test_phase_fairness_and_layer_boundary(self):
         s = Scheduler([Lane(0, 0, 0), Lane(1, 0, 1), Lane(2, 0, 0)], 8, 8)
         for i in range(3):
@@ -201,7 +242,8 @@ class IndexedDirectoryTests(unittest.TestCase):
         rng = random.Random(950)
         for case_idx in range(300):
             lanes = [Lane(dp, member, phase=phase, task=rng.choice([None, (0, 2, 0, 3), (1, 2, 0, 3)]),
-                          credit=rng.choice([False, True]), held=rng.choice([False, True]))
+                          credit=rng.choice([False, True]), held=rng.choice([False, True]),
+                          counts=[rng.randrange(3)], consumed=[0])
                      for dp in range(2) for phase in range(2) for member in range(3) for slot in range(3)]
             rng.shuffle(lanes)
             if case_idx % 2 == 0:
@@ -225,7 +267,8 @@ class IndexedDirectoryTests(unittest.TestCase):
                 expected = []
                 for (dp, phase, task), group in groups.items():
                     required = {l.member for l in lanes if (l.dp, l.phase) == (dp, phase)}
-                    if {lanes[i].member for i in group} == required and (not precheck or all(lanes[i].credit or lanes[i].held for i in group)):
+                    has_routes = any(sum(lanes[i].counts) > sum(lanes[i].consumed) for i in group)
+                    if {lanes[i].member for i in group} == required and ((not precheck and has_routes) or all(lanes[i].credit or lanes[i].held for i in group)):
                         expected.append(tuple(group))
                 self.assertEqual(indexed_ready(lanes, precheck), expected)
 
@@ -235,6 +278,7 @@ class IndexedDirectoryTests(unittest.TestCase):
             for slot in range(slots):
                 task = (slot, 4, 2, 8)
                 lanes[slot].task = task
+                lanes[slot].counts = [1]
                 lanes[slots+slot].task = task
                 lanes[slots+slot].counts = [0]  # Exhausted owner still participates.
             expected = [(slot, slots+slot) for slot in range(slots)]

@@ -64,7 +64,7 @@ deep_ep.AFDBuffer.create_local_receiver(
 | AFDActiveSegment | 32B | entry_idx, source_lane_idx, local_expert_idx, route_begin, num_routes, dst_row_begin, reserved[2] |
 | AFDExecutionState | 32B header | stage, error_code, num_entries, reserved[5]；随后 uint32 grant_state 数组 |
 
-设 L 为 source lane 数、R 为 F 本地专家数，`A32(x)=align32(x)`：entries_offset=64，members_offset=64+32L，segments_offset=64+64L；Active 字节数 `64+64L+32LR`，ExecutionState 字节数 `32+A32(4L)`，workspace 字节数 `32*num_vec_cores+256`。Entry/Member 容量 L，Segment 容量 LR。offset 固定且不能重叠；动态计数不可超过容量。Segment 的 24B 逻辑字段不代表物理 stride，实际 stride 为 32B。
+设 L 为 source lane 数、R 为 F 本地专家数，`A32(x)=align32(x)`：entries_offset=64，members_offset=64+32L，segments_offset=64+64L；Active 字节数 `64+64L+32LR`，ExecutionState 字节数 `32+A32(4L)`，dispatch workspace 字节数 `32*num_vec_cores+256+2*A32(4*min(L*R,Q))`。最后两项索引buffer用于有界Segment校验；host计入budget。Entry/Member 容量 L，Segment 容量 LR且实际Segment数不大于有效行数。offset 固定且不能重叠；动态计数不可超过容量。Segment 的 24B 逻辑字段不代表物理 stride，实际 stride 为 32B。
 
 复用 sender 的 Context 224B、Workspace 96B 和 TokenLayout，不改变发送协议。设 X 为 hidden 字节数、B 为 SF 字节数：SF offset=X，topk_idx offset=`X+A32(B)`，topk_weights offset=`X+A32(B)+A32(8K)`，src_token_idx 再加 4K，valid_topk_mask 再加 4。metadata stride M 为 `A32(valid_topk_mask_offset+4-X)`，record stride D 为 `align512(valid_topk_mask_offset+4)`。发送端只传 X+M，recv 也只读 X+M；不能把 D 的未发送尾洞读作有效数据。
 
@@ -146,14 +146,16 @@ timeout 300s torchrun --standalone --nproc_per_node=2 tests/afd/run_send_recv_a5
 
 基线为 DeepEP HEAD `3b25377d04b24fc6154698ded78a2bcb2c59afff`。复用 `impls/ep/dispatch_copy_epilogue.hpp` 的 TokenLayout 思路、AIV/MTE bytecopy、事件和全核完成语义，沿 `csrc/kernels/ep/dispatch.hpp` 的 DeepJIT 编译/launch 方式，接入既有 AFDBuffer owner 与 pybind。AFD 新增公共 Active ABI、本地 route 定位/校验、四列 metadata、专家 padding、状态发布；不改原 EP kernel 或 sender wire。
 
-原 EP epilogue kernel实际只输出row-major SF，host需要列布局时另行转换；不能宣称列布局是原生kernel分支。当前column-major分支先等待本stage hidden输出完成，再复用第一条record的hidden UB区域进行多行SF转列。各列起点32B对齐，每列一次 `2*num_stage_tokens` 字节DMA、每列块统一等待；列多于X/32时分块复用。SF源在各record的+X处，不被hidden区重排覆盖。没有额外GM SF镜像；T=1或尾块仍可能是2B DMA。metadata使用独立对齐stage，尾块可为16B写入；这些长度、bypass读取、地址空间及SyncAll资源仍须真实Bisheng/A5验证。
+原 EP epilogue kernel实际只输出row-major SF，host需要列布局时另行转换；不能宣称列布局是原生kernel分支。当前column-major分支先等待本stage hidden输出完成，再复用第一条record的hidden UB区域进行多行SF转列。各列起点32B对齐，每个列块一次多burst DMA：burst数为列数、每burst为`2*num_stage_tokens`字节、源步长32B、目的步长`2*recv_sf_hidden_stride`，均按950 C API块头到块头字节距离；列多于X/32时分块复用。SF源在各record的+X处，不被hidden区重排覆盖。没有额外GM SF镜像；T=1或尾块仍可能是2B burst。metadata使用独立对齐stage，尾块可为16B写入；这些长度、bypass读取、地址空间及SyncAll资源仍须真实Bisheng/A5验证。
 
-workspace 仅 `32*num_vec_cores+256`；UB 预算为 `2*A32(T*D)+2*A32(16T)+2*A32(4T)+832`，T 从 1/2/4/8/16 中按真实 UB 和 stage 约束选取。没有全事务展开缓存或额外完整hidden/SF镜像，公开ABI及容量保持不变。
+workspace增加两份有界uint32 Segment索引，Q=32768时最多额外256KiB；combine scratch不受影响。UB 预算仍为 `2*A32(T*D)+2*A32(16T)+2*A32(4T)+832`，T 从 1/2/4/8/16 中按真实 UB 和 stage 约束选取。没有全事务展开缓存或额外完整hidden/SF镜像，公开张量接口及容量保持不变。
 
 当前先由core0校验公共结构、边界及Segment重叠，再由各核按目的区间交集并行预检selected route/metadata。routeReference按T条批量读取，检查本批所有record地址后才发metadata DMA，每批统一等待；不是将P条间接metadata DMA自动减少到P/T条。各核错误写入既有32B槽，汇总并全核同步之后才允许输出，保持任一预检错误不留下部分输出的语义。
 
 copy采用Segment外层遍历，每核处理与自身目的区间相交的部分，因此支持Entry内Segment目的行乱序及跨核区间，无逐输出行全表扫描。保留原生 `issue_load`、`stage_num_tokens`、`stage_token_base_idx`、`stage_idx` 命名和双stage预加载/回填逻辑；连续record合并搬运，仅区间内部包含record对齐洞，最后一条不读未发送尾洞。MTE2→S保护消费，MTE3→MTE2保护record stage回填，独立MTE3→S保护metadata stage。padding另按专家区间生成，复用原生vector fill逻辑。
 
-剩余限制：core0结构校验仍含Segment两两检查；预检与copy仍有metadata双读；同record跨本地专家Segment仍可能重复读取，没有恢复完整token本地扇出。双stage主要在单Segment内部发挥作用，短Segment及列SF转置前的hidden完成等待会限制重叠；UB转列仍为标量重排。完全恢复token扇出需要有界反向映射/源分桶及目的ownership，不能通过整轮hidden缓存绕过预算。以上仅描述源码机制，不承诺原EP吞吐或任何已实测性能收益。
+2026-10-21：core0对输入/输出区间各做一次有界索引归并排序，区间校验从O(S²+R*S)降为O(S log S+R)，S为本片Segment数；支持任意Segment顺序和跨核区间，保持所有输出之前完成预检。其余目录/Entry/Member校验仍含串行扫描及成员查找，不能把局部复杂度改进当作全部预检并行化。
+
+剩余限制：预检与copy仍有metadata双读；同record跨本地专家Segment仍可能重复读取，没有恢复完整token本地扇出。双stage主要在单Segment内部发挥作用，短Segment及列SF转置前的hidden完成等待会限制重叠；UB转列仍为标量重排。完全恢复token扇出需要有界反向映射/源分桶及目的ownership，不能通过整轮hidden缓存绕过预算。这些是静态可见、尚未实施的优化项，收益才需实测；不承诺原EP吞吐。
 
 2026-10-19：源码已按原生函数边界和逻辑阶段整理；函数映射、阅读顺序及同步不变性验证见[dispatch代码导航](dispatch_code_map.md)。

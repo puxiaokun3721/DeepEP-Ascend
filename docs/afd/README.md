@@ -31,6 +31,14 @@ ffnScheduler 每次收集 InputReady 快照后重建成员索引，复用 Pendin
 
 ## 验证边界
 
-已有记录为 56 项 CPU 模型/ABI 测试通过；不等于执行了 C++ 算子。尚无 CANN/Bisheng/JIT 编译、A5 精度、图模式或性能通过证据。本次目录整理仅检查文档链接、归档完整性和变更范围。
+2026-10-21联合回归为70项CPU模型/ABI测试通过；不等于执行了C++算子。尚无CANN/Bisheng/JIT编译、A5精度、图模式或性能通过证据。
 
 优化过程记录保留在本机 `.local-archive/afd-docs-2026-10-19/`，已忽略；已有 Git 历史仍可追溯。
+
+## 2026-10-21 静态返回活性修复
+
+多本地槽与多轮组合不能顺序运行完整事务阻塞recv。默认模式在send发布前及recv入口拒绝该组合；P单槽多轮、D多槽单轮保持兼容。需要该组合时显式启用`prepare_combine_recv(round_step=True, fair_round_robin=True)`，使用同一`combineRecv(..., start=True/False)`及固定公平sweep driver。每槽增加96B持久metadata，单归并workspace和小返回窗口不变，默认先算后等保留。详见[返回推进时序、状态机和图契约](remaining_operators.md#多槽多轮的返回推进2026-10-21静态修复)。
+
+新增8项CPU模型/ABI检查复现旧循环等待，验证公平step推进、最终ACK非阻塞、重复start/TaskInfo变化的持久ERROR及既有场景admission；它们不执行C++ kernel。目标SDK编译、A5多槽多轮、真实图sweep与跨卡可见性仍未验收。
+
+同轮静态修复还包括：scheduler两种策略均过滤缺credit的零route组；dispatchRecv采用两轮有界Segment索引排序（新增最多256KiB metadata）替代区间两两比较，SF列布局每列块改一条多burst DMA。默认非空WORK先算后等、Continuation、Q/Q_alloc及原双stage不变。[接收说明](dispatch_recv.md)明确列出仍未实施的片内record扇出等优化，不能将这些静态事实归为硬件未知。

@@ -9,6 +9,7 @@ constexpr uint64_t align512(uint64_t n) { return (n + 511) / 512 * 512; }
 constexpr uint32_t kAbiVersion = 1;
 // Current implementation-family bound per lane/physical slot, never a DP aggregate bound.
 constexpr uint32_t kMaxLaneTokens = 32768;
+enum ReturnProgressMode : uint32_t { RETURN_TRANSACTION=0, RETURN_ROUND_STEP=1 };
 enum Error : uint32_t { OK=0, BAD_ABI=1, BAD_TASK=2, BAD_LAYER=3, BAD_ROUTE=4,
                         CAPACITY=5, STATE_ORDER=6, TIMEOUT=7, TRANSPORT=8 };
 struct alignas(32) AFDControlBlock { uint32_t value, reserved[7]; };
@@ -54,7 +55,8 @@ struct alignas(32) AFDContextLayout {
     // num_max_tokens_per_rank: legacy native per-call bound, here C_max=max_l lane.capacity.
     // Neither field represents a DP sum; C_max sizes per-window JIT/workspace only.
     uint32_t num_vec_cores, num_token_capacity, num_max_tokens_per_rank, num_tokens_per_tile;
-    uint32_t num_layers, src_rank_idx, num_slots, reserved;
+    // Former reserved word: fixed at initialization; mode 1 requires matching new binaries.
+    uint32_t num_layers, src_rank_idx, num_slots, return_progress_mode;
     uint64_t lanes_offset, peers_offset, addresses_offset, layers_offset;
     uint64_t context_bytes, payload_bytes, control_bytes, reserved_address;
     AFDWorkspace workspace;
@@ -64,6 +66,7 @@ static_assert(sizeof(AFDControlBlock)==32 && sizeof(AFDSendState)==32);
 static_assert(sizeof(AFDLane)==32 && sizeof(AFDPeer)==32 && sizeof(AFDAddress)==64);
 static_assert(sizeof(AFDWorkspace)==96 && sizeof(AFDContextLayout)==224);
 static_assert(offsetof(AFDContextLayout,workspace)==128);
+static_assert(offsetof(AFDContextLayout,return_progress_mode)==60);
 constexpr AFDWorkspace make_workspace(uint32_t c, uint32_t t, uint32_t k,
                                       uint32_t e, uint32_t n, uint32_t m, uint32_t slots) {
     AFDWorkspace w{}; uint64_t p=0, j=(uint64_t(c)+t-1)/t;

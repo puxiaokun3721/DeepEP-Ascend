@@ -12,6 +12,16 @@ struct alignas(32) AFDReturnDirectory {
 struct alignas(32) AFDReturnLane {
     uint64_t return_offset, done_offset, credit_offset, reserved;
 };
+// One bounded A-local cursor per physical slot, independent of shared reduction scratch.
+// A first start admits immutable TaskInfo; sweeps cannot reset a live or failed transaction.
+enum ReturnProgressState : uint32_t { RETURN_IDLE=0, RETURN_RUNNING=1, RETURN_WAIT_ACK=2,
+                                      RETURN_DONE=3, RETURN_ERROR=4 };
+struct alignas(32) AFDReturnProgress {
+    AFDTaskInfo task;
+    uint32_t state, next_round, last_input_bit, error_code, reserved[4];
+};
+constexpr uint64_t combine_recv_workspace_bytes(uint32_t nc) { return 256+align32(32*uint64_t(nc)); }
+static_assert(sizeof(AFDReturnProgress)==96);
 enum CompletionState : uint32_t { COMPLETION_EMPTY=0, ARMED=1, READY=2 };
 struct alignas(32) AFDCompletion {
     uint32_t state, error_code, num_entries, num_members;

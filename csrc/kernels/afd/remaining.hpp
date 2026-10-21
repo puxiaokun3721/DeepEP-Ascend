@@ -44,16 +44,17 @@ static void __instantiate_kernel() {{
 }
 static void launch_combine_recv(void* x,void* idx,void* weights,void* mask,void* buffer,
     void* task,void* context,void* control,void* ledger,void* workspace,void* status,
-    const AFDContextLayout& c,int hidden,int chunk,int ub,int64_t timeout) {
+    const AFDContextLayout& c,int hidden,int chunk,int ub,int64_t timeout,
+    void* progress,bool round_step,bool start) {
     const auto kernel=jit->compile("afd_combine_recv",std::format(R"(
 #include <deep_ep/impls/afd/combine_recv.hpp>
 using namespace deep_ep::afd;
 static void __instantiate_kernel() {{
- auto ptr=reinterpret_cast<void*>(&combine_recv_impl<{},{},{},{},{},{},{}>);
+ auto ptr=reinterpret_cast<void*>(&combine_recv_impl<{},{},{},{},{},{},{},{}>);
 }}
-)",c.num_experts,c.num_ranks,c.num_topk,hidden,chunk,c.num_vec_cores,timeout));
+)",c.num_experts,c.num_ranks,c.num_topk,hidden,chunk,c.num_vec_cores,timeout,round_step?1:0));
     jit->launch(kernel,{.num_blocks=int(c.num_vec_cores),.num_ubuf_bytes=ub},x,idx,weights,mask,
-        buffer,task,context,control,ledger,workspace,status);
+        buffer,task,context,control,ledger,workspace,status,progress,start);
 }
 }
 // ### PATCH END: remaining AFD launchers

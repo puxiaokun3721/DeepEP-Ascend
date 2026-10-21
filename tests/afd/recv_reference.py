@@ -46,6 +46,38 @@ class Segment:
                         self.count, self.dst, 0, 0)
 
 
+def validate_segment_intervals(segments, *, num_experts, alignment, capacity):
+    """Piece-local interval oracle: arbitrary input order, no token/hidden cache.
+
+    Independent Python sorting checks the predicates used by device preflight;
+    reference() below separately checks individual route/output row uniqueness.
+    This is not Ascend C execution or a performance measurement.
+    """
+    if any(s.count <= 0 or s.route_begin < 0 or s.dst < 0 or s.lane < 0 or
+           not 0 <= s.expert < num_experts for s in segments):
+        raise ValueError('segment')
+    source_order = sorted(segments, key=lambda s: (s.lane, s.expert, s.route_begin))
+    for previous, current in zip(source_order, source_order[1:]):
+        if (previous.lane == current.lane and previous.expert == current.expert and
+                current.route_begin < previous.route_begin + previous.count):
+            raise ValueError('duplicate input interval')
+    destination_order = sorted(segments, key=lambda s: (s.expert, s.dst))
+    next_segment, physical = 0, 0
+    for expert in range(num_experts):
+        count = 0
+        while (next_segment < len(destination_order) and
+               destination_order[next_segment].expert == expert):
+            segment = destination_order[next_segment]
+            if segment.dst != physical + count:
+                raise ValueError('dense expert interval')
+            count += segment.count
+            next_segment += 1
+        physical += align(count, alignment)
+        if physical > capacity:
+            raise ValueError('capacity')
+    return physical
+
+
 def pack_active(lanes, experts, segments, entry_lanes, *, kind=WORK,
                 valid=1, phase=0, layer=0, alignment=4, grants=None, finals=None):
     """Materialize an externally selected Active fixture, never select a task.

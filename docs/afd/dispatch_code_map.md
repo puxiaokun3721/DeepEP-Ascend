@@ -47,7 +47,7 @@ S2.4中的metadata stage推进仍在主函数原位置，未抽出成串行子ke
 ```text
 launch_dispatch_recv -> afd::dispatch_copy_epilogue_impl
   R0 初始化/Active门控
-  R1 目录及Entry/Member/Segment结构预检
+  R1 目录及Entry/Member结构预检；Segment索引按输入/输出区间排序校验
   R2 并行route metadata预检、全核错误汇总
   R3 定义issue_output（此处只定义，不执行输出）
   R4 每个相交Segment
@@ -63,6 +63,6 @@ R3是lambda定义位置，实际调用在R4/R5；不能把图中的函数定义�
 
 - 发送：metadata MTE2→S就绪、MTE3→MTE2复用保护、尾部release消费、WQE发布和drain顺序均不变。
 - 接收：refs加载仍位于record refill保护等待之前；MTE2→S、MTE3→MTE2和metadata独立MTE3→S事件及循环位置不变。
-- 原生大阶段继续内联，未引入新的函数调用/同步边界、缓冲区或workspace。
+- 原生数据搬运大阶段继续内联；2026-10-21增加AFD专用Segment索引排序helper与两份有界GM索引（最多256KiB），不改变数据双stage和原生EP文件。
 - JIT生成代码改用限定名称deep_ep::afd::dispatch_impl及deep_ep::afd::dispatch_copy_epilogue_impl；缓存标签、模板参数顺序、launch参数及Python接口不变。
-- 56项CPU模型测试通过；git diff --check通过。尚未做CANN/JIT编译或A5执行，尤其内部kernel改名后的符号实例化须实机确认。没有新增精度/性能通过声明。
+- 2026-10-21联合回归70项CPU模型/ABI测试通过；git diff --check通过。尚未做CANN/JIT编译或A5执行，尤其内部kernel符号实例化及多burst重载须实机确认。没有新增设备精度/性能通过声明。

@@ -35,6 +35,8 @@ class AFDBuffer {
     std::optional<torch::Tensor> owned_recv_sf;
     // F state persists across replay; A return scratch is independent of dispatchSend.
     bool ffn_prepared=false,combine_recv_prepared=false,scheduler_precheck=false;
+    bool combine_recv_round_step=false,source_launched=false;
+    torch::Tensor owned_combine_recv_progress;
     int combine_tile=32,combine_chunk=0;
     torch::Tensor owned_scheduler_workspace,owned_completion,owned_psum,owned_counts;
     torch::Tensor owned_combine_x,owned_combine_send_workspace,owned_combine_recv_workspace,owned_recv_status;
@@ -80,7 +82,8 @@ class AFDBuffer {
     void check_input_alias(const at::Tensor& input) const {
         const uint64_t begin=reinterpret_cast<uintptr_t>(input.data_ptr()),bytes=tensor_span_bytes(input);
         EP_HOST_ASSERT(bytes<=UINT64_MAX-begin);
-        for(const auto* owner:{&owned_context,&owned_control,&owned_ledger,&owned_workspace,&owned_status,&owned_payload}) {
+        for(const auto* owner:{&owned_context,&owned_control,&owned_ledger,&owned_workspace,&owned_status,&owned_payload,&owned_combine_recv_progress}) {
+            if(!owner->defined())continue;
             const uint64_t other=reinterpret_cast<uintptr_t>(owner->data_ptr()),other_bytes=owner->nbytes();
             EP_HOST_ASSERT(other_bytes<=UINT64_MAX-other);
             EP_HOST_ASSERT(bytes==0 || other_bytes==0 || begin+bytes<=other || other+other_bytes<=begin);
@@ -285,6 +288,7 @@ public:
         owned_scheduler_workspace=torch::Tensor();owned_completion=torch::Tensor();
         owned_psum=torch::Tensor();owned_counts=torch::Tensor();owned_combine_x=torch::Tensor();
         owned_combine_send_workspace=torch::Tensor();owned_combine_recv_workspace=torch::Tensor();owned_recv_status=torch::Tensor();
+        owned_combine_recv_progress=torch::Tensor();
         payload_context.reset();control_context.reset();
     }
     // ### PATCH START: receiver initialization and out-style public operation
@@ -372,12 +376,13 @@ public:
         EP_HOST_ASSERT(recv_tile>0);
         const uint64_t l=config.num_source_lanes,r=config.num_experts/config.num_ranks;
         EP_HOST_ASSERT(l<=INT_MAX && config.num_layers<=INT_MAX && l*r<=UINT32_MAX);
-        const uint64_t additional=checked_allocation_bytes({active_bytes(l,r),execution_bytes(l),recv_workspace_bytes(config.num_vec_cores),
+        const uint64_t recv_scratch=dispatch_recv_workspace_bytes(config.num_vec_cores,l,r,q);
+        const uint64_t additional=checked_allocation_bytes({active_bytes(l,r),execution_bytes(l),recv_scratch,
             uint64_t(q_alloc)*(config.num_hidden_bytes+2*uint64_t(config.num_sf_packs)+16)});
         EP_HOST_ASSERT(known_allocation_bytes<=budget_bytes && additional<=budget_bytes-known_allocation_bytes);
         EP_HOST_ASSERT(transport_reserve_bytes<=budget_bytes-known_allocation_bytes-additional);
         owned_active=byte_tensor(active_bytes(l,r));owned_execution=byte_tensor(execution_bytes(l));
-        owned_recv_workspace=byte_tensor(recv_workspace_bytes(config.num_vec_cores));
+        owned_recv_workspace=byte_tensor(recv_scratch);
         zero_tensor(owned_active);zero_tensor(owned_execution);zero_tensor(owned_recv_workspace);
         AFDActive header{};header.entries_offset=active_entries_offset();header.members_offset=active_members_offset(l);header.segments_offset=active_segments_offset(l);
         ACL_CHECK(aclrtMemcpy(owned_active.data_ptr(),owned_active.nbytes(),&header,sizeof(header),ACL_MEMCPY_HOST_TO_DEVICE));
@@ -436,9 +441,12 @@ public:
         scheduler_precheck=precheck;ffn_prepared=true;known_allocation_bytes+=extra;
     }
     // Independent A-side scratch permits concurrent dispatchSend and combineRecv.
-    void prepare_combine_recv() {
+    void prepare_combine_recv(bool round_step=false,bool fair_round_robin=false) {
         using namespace afd;
-        EP_HOST_ASSERT(!closed && config.src_rank_idx!=UINT32_MAX && !combine_recv_prepared);
+        EP_HOST_ASSERT(!closed && config.src_rank_idx!=UINT32_MAX && !combine_recv_prepared && !source_launched);
+        // Explicit framework obligation, not an automatic liveness proof: the caller must
+        // sweep every active local slot fairly, including WAIT_ACK, on this one recv stream.
+        EP_HOST_ASSERT(round_step==fair_round_robin);
         // Both polling kernels must be able to reside together; stream concurrency
         // and SyncAll resource isolation still require target-runtime validation.
         EP_HOST_ASSERT(2*uint64_t(config.num_vec_cores)<=uint64_t(runtime->get_num_vec_cores()));
@@ -446,11 +454,22 @@ public:
         EP_HOST_ASSERT(uint64_t(num_ub_bytes)>fixed);
         combine_chunk=int(std::min(uint64_t(hidden),(uint64_t(num_ub_bytes)-fixed)/14)/128*128);
         EP_HOST_ASSERT(combine_chunk>=128);
-        const uint64_t extra=recv_workspace_bytes(config.num_vec_cores)+32;
+        const uint64_t scratch=combine_recv_workspace_bytes(config.num_vec_cores);
+        const uint64_t progress_bytes=round_step?sizeof(AFDReturnProgress)*uint64_t(config.num_slots):0;
+        const uint64_t extra=checked_allocation_bytes({scratch,32,progress_bytes});
         EP_HOST_ASSERT(known_allocation_bytes<=budget_bytes && extra<=budget_bytes-known_allocation_bytes);
         EP_HOST_ASSERT(transport_reserve_bytes<=budget_bytes-known_allocation_bytes-extra);
-        owned_combine_recv_workspace=byte_tensor(extra-32);zero_tensor(owned_combine_recv_workspace);
+        owned_combine_recv_workspace=byte_tensor(scratch);zero_tensor(owned_combine_recv_workspace);
         owned_recv_status=torch::zeros({8},torch::TensorOptions().device(TORCH_DEVICE_NPU).dtype(torch::kUInt32));
+        if(round_step) {
+            owned_combine_recv_progress=byte_tensor(progress_bytes);zero_tensor(owned_combine_recv_progress);
+        }
+        // Initialization-time only. The former reserved Context word fixes both send and
+        // recv admission; mode-1 contexts must not be passed to an older binary.
+        config.return_progress_mode=round_step?RETURN_ROUND_STEP:RETURN_TRANSACTION;
+        ACL_CHECK(aclrtMemcpy(static_cast<uint8_t*>(owned_context.data_ptr())+offsetof(AFDContextLayout,return_progress_mode),
+            sizeof(config.return_progress_mode),&config.return_progress_mode,sizeof(config.return_progress_mode),ACL_MEMCPY_HOST_TO_DEVICE));
+        combine_recv_round_step=round_step;
         known_allocation_bytes+=extra;combine_recv_prepared=true;
     }
     torch::Tensor scheduler_workspace()const{return owned_scheduler_workspace;}
@@ -461,6 +480,7 @@ public:
     torch::Tensor combine_send_workspace()const{return owned_combine_send_workspace;}
     torch::Tensor combine_recv_workspace()const{return owned_combine_recv_workspace;}
     torch::Tensor recv_status()const{return owned_recv_status;}
+    torch::Tensor combine_recv_progress()const{return owned_combine_recv_progress;}
     // Signature follows the scheduler design; buffer/rank and static family belong to this owner.
     void ffnScheduler(const at::Tensor& context,const at::Tensor& control_buffer,at::Tensor& workspace,
         at::Tensor& active,at::Tensor& execution_state,at::Tensor& completion,
@@ -490,11 +510,15 @@ public:
             execution_state.data_ptr(),workspace.data_ptr(),payload_context->jetty_device_ptrs,completion.data_ptr(),
             config,recv_rank,hidden,recv_q_alloc,combine_tile,num_ub_bytes,timeout_cycles);
     }
+    // AFD addition to the weighted epilogue owner: start admits one transaction
+    // only in round-step mode. Later start=false calls share scratch but retain
+    // each slot's cursor, so an unready transaction cannot block other slots.
     void combineRecv(const at::Tensor& combined_topk_idx,const at::Tensor& topk_weights,
         const std::optional<at::Tensor>& token_mask,const at::Tensor& task_info,const at::Tensor& context,
         at::Tensor& buffer,at::Tensor& control_buffer,at::Tensor& round_ledger,at::Tensor& workspace,
-        at::Tensor& combined_x,at::Tensor& recv_status) {
+        at::Tensor& combined_x,at::Tensor& recv_status,bool start=false) {
         EP_HOST_ASSERT(!closed && combine_recv_prepared);
+        EP_HOST_ASSERT(combine_recv_round_step || !start);
         check_owned(context,owned_context);check_owned(buffer,owned_payload);check_owned(control_buffer,owned_control);
         check_owned(round_ledger,owned_ledger);check_owned(workspace,owned_combine_recv_workspace);check_owned(recv_status,owned_recv_status);
         check_bytes(task_info,sizeof(afd::AFDTaskInfo));EP_HOST_ASSERT(task_info.device()==context.device());
@@ -509,6 +533,7 @@ public:
             combined_x.is_contiguous() && combined_x.dim()==2 && combined_x.size(0)==config.num_token_capacity && combined_x.size(1)==hidden);
         std::vector<const at::Tensor*> regions{&combined_topk_idx,&topk_weights,&task_info,&context,&buffer,
             &control_buffer,&round_ledger,&workspace,&combined_x,&recv_status};
+        if(combine_recv_round_step)regions.push_back(&owned_combine_recv_progress);
         if(token_mask)regions.push_back(&*token_mask);
         for(size_t i=0;i<regions.size();++i)for(size_t j=0;j<i;++j) {
             const auto a=reinterpret_cast<uintptr_t>(regions[i]->data_ptr()),b=reinterpret_cast<uintptr_t>(regions[j]->data_ptr());
@@ -521,7 +546,8 @@ public:
         afd::launch_combine_recv(combined_x.data_ptr(),combined_topk_idx.data_ptr(),topk_weights.data_ptr(),
             token_mask?token_mask->data_ptr():nullptr,buffer.data_ptr(),task_info.data_ptr(),context.data_ptr(),
             control_buffer.data_ptr(),round_ledger.data_ptr(),workspace.data_ptr(),recv_status.data_ptr(),
-            config,hidden,combine_chunk,num_ub_bytes,timeout_cycles);
+            config,hidden,combine_chunk,num_ub_bytes,timeout_cycles,
+            combine_recv_round_step?owned_combine_recv_progress.data_ptr():nullptr,combine_recv_round_step,start);
     }
     // Public signature matches dispatchRecv/design.md. The owner supplies local Inbox and F rank.
     void dispatchRecv(const at::Tensor& buffer,const at::Tensor& context,const at::Tensor& active,
@@ -533,7 +559,8 @@ public:
         check_bytes(buffer,config.payload_bytes);check_bytes(context,config.context_bytes);
         check_bytes(active,afd::active_bytes(config.num_source_lanes,config.num_experts/config.num_ranks));
         check_bytes(execution_state,afd::execution_bytes(config.num_source_lanes));
-        check_bytes(workspace,afd::recv_workspace_bytes(config.num_vec_cores));
+        check_bytes(workspace,afd::dispatch_recv_workspace_bytes(config.num_vec_cores,
+            config.num_source_lanes,config.num_experts/config.num_ranks,recv_q));
         check_bytes(owned_control,config.control_bytes);
         // Outputs may be independently preallocated, but must match the static family and not overlap.
         EP_HOST_ASSERT(recv_x.device()==context.device() && recv_x.is_contiguous() && recv_x.dim()==2 &&
@@ -598,6 +625,7 @@ public:
         check_input_alias(x);check_input_alias(topk_idx);check_input_alias(topk_weights);check_input_alias(task_info);
         if(sf)check_input_alias(*sf);
         if(token_mask)check_input_alias(*token_mask);
+        source_launched=true; // Context progress mode is immutable once any source launch starts.
         afd::launch_dispatch_send(x.data_ptr(),sf?sf->data_ptr():nullptr,topk_idx.data_ptr(),topk_weights.data_ptr(),
             token_mask?token_mask->data_ptr():nullptr,task_info.data_ptr(),context.data_ptr(),control_buffer.data_ptr(),
             round_ledger.data_ptr(),workspace.data_ptr(),payload_context->jetty_device_ptrs,send_status.data_ptr(),

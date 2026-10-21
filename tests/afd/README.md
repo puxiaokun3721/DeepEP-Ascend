@@ -1,6 +1,78 @@
 # AFD operator test artifacts
 
-## Remaining operators (2026-10-16)
+## Current multi-slot/multi-round A5 bring-up (2026-10-21, not executed here)
+
+`run_pipeline_a5.py` accepts `--microbatches 1|2|3` (default 1) and
+`--round-step` (default off). Defaults preserve the prior single-slot multi-round
+case. Multiple local slots with multiple rounds require `--round-step`; both
+argument validation and device admission reject the unsafe legacy combination.
+Every A rank owns separate task/input/output tensors per microbatch, submits
+sends serially on one send stream, and receives on one independent recv stream.
+In step mode, start is called once per slot, then every slot receives one call in
+each fixed fair sweep, including slots waiting for final ACK. Status/progress
+copies are queued on the recv stream; the harness never waits for the live send
+stream or performs an A-wide device synchronize before return progress finishes.
+Only then does it join the last recv work with the send Epub event.
+
+This is a functional bring-up driver with host observations and identity experts,
+not a graph or performance benchmark. `--timeout-seconds` (default 600) bounds
+host progress and kernel/domain timeouts; `--max-sweeps` (default 100000) bounds
+sweep submission. Use an external watchdog for runtime failures that prevent a
+host API returning. No Ready, Done, Consumed or credit is fabricated or reset.
+F completion counts `num_comm_rounds * microbatches` DP entries, including zero
+routes and exhausted members. Only this run's process group may be stopped on
+failure; never kill an unrelated NPU workload.
+
+**Preconditions before any command below:**
+
+1. Use the approved existing Docker/container image and isolated test directory.
+   Record host driver/firmware, CANN, compiler, torch/torch_npu, HCOMM/URMA and
+   repository revisions before compiling. Do not install, upgrade, downgrade,
+   edit host/container configuration or change drivers. If a prerequisite or
+   version is incompatible, stop and ask the environment owner.
+2. Inspect devices with the site's `mup-smi` tool (or its documented `npu-smi`
+   command if that is the actual installed name). Select only explicitly free,
+   authorized devices and map them into the container. Do not disturb active
+   jobs, reset a device, or use commands targeting another process.
+3. Build the matching modified DeepEP extension and make the pinned DeepJIT
+   dependency available inside that approved container. Resolve unknown SDK/API
+   compatibility before the communication test. Cold JIT compilation during an
+   active transaction can exceed the timeout; record it separately, and do not
+   claim an operator protocol failure solely from cold-compile timing.
+4. Run from the DeepEP repository inside the container; the container must expose
+   the requested 2 or 4 devices. The watchdog below targets only the new test job.
+
+```bash
+# Legacy P: one physical slot, multiple communication rounds (unchanged default).
+timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.py
+# Legacy D: M=2/3, one round each remains supported.
+timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.py --batch 13 --window 16 --microbatches 3
+# New fair round-step: two owners, M=2/3, hotspot F plus zero-route F.
+timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.py --microbatches 2 --round-step
+timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.py --microbatches 3 --round-step
+# Short second owner, then all-zero second owner; both keep zero-length tail rounds.
+timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.py --microbatches 3 --round-step --short-second 3
+timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.py --microbatches 3 --round-step --short-second 0
+# All-masked CONTROL and optional credit-precheck policy.
+timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.py --microbatches 3 --round-step --all-masked
+timeout 900s torchrun --standalone --nproc_per_node=4 tests/afd/run_pipeline_a5.py --microbatches 3 --round-step --precheck
+# Small topology alternative: one A, one F, two slots.
+timeout 900s torchrun --standalone --nproc_per_node=2 tests/afd/run_pipeline_a5.py --microbatches 2 --round-step
+```
+
+Expected success is a final JSON `status=PASS` after every per-slot BF16 output,
+masked zero and untouched allocation tail is checked, all real final ACKs have
+closed, send statuses succeeded, and every F has committed the expected entries.
+The script prints `microbatches`, `round_step` and rank0 sweep count. On failure,
+retain command, versions, full log, per-slot progress/error state and local patch;
+do not change the environment or push to GitHub automatically. A sweep count is
+not a latency/bandwidth result. Graph replay, visibility, synchronization resource
+isolation and measured performance remain separate A5 gates.
+
+Local verification of this new entry is **AST parsing only**: no torch import,
+C++ compilation or NPU execution was performed here.
+
+## Historical remaining-operator CPU record (2026-10-16)
 
 Current suite: **51 CPU tests passed**, **19 Python AST checks passed**.
 The 18 new cases cover scheduler state/selection, combineSend route/Completion
@@ -44,7 +116,8 @@ It does not execute a communication kernel. The real HCCL constructor, sender
 8-round execution, live ACK/credit closure, scheduler aggregation, graph replay
 and A5 kernel output/performance remain separate hardware gates. Do not invoke
 multi-round send without a real ACK consumer and mistake a hang for capacity
-failure; those downstream operators are not yet implemented.
+failure. The downstream operators now have source implementations and the real
+five-operator harness above; hardware validation remains outstanding.
 
 This is the CPU contract/oracle portion of the approved test plan, not a completed A5 test harness. No torch or pytest dependency is required; NumPy is required. Tests do not import or execute the Ascend kernel.
 
@@ -62,11 +135,11 @@ Other tests validate the CPU oracle with corruption injections and the abstract 
 
 ## A5 execution gap and required procedure
 
-A two-process, single-round real kernel entry is provided below. There is currently no persistent test receiver kernel / multi-round A5 harness in this directory. Do **not** use a host `tensor.cpu()` poll loop on the same stream as a persistent send kernel: that can deadlock and does not test stream concurrency. There is no fake passing or skipped NPU test hiding this gap.
+A two-process, single-round real kernel entry is provided below, and the five-operator multi-round harness is documented above. Neither has been run in this CPU-only workspace. Do **not** use a host `tensor.cpu()` poll loop on the same stream as a persistent send kernel: that can deadlock and does not test stream concurrency. The round-step driver observes progress on the independent recv stream.
 
 1. On the actual Ascend950 stack, initialize DeepJIT dependencies, build the DeepEP host extension, and compile the new JIT dispatchSend path. Record compiler, CANN, HCOMM/URMA and driver versions.
-2. Add an F test-only device receiver that observes its local InputReady, snapshots Inbox/payload/count/prefix/route before ACK, and writes the matching Consumed to A. Include every F, including zero-route F. This requires the actual owner/control mapping, not a guessed global address.
-3. Add an A receiver-side Ledger consumer on a genuinely concurrent stream. It must release each bank only after the test receiver has consumed the matching round. For multiple rounds do not make dispatchSend clear Ledger itself.
+2. Validate the actual ffnScheduler/dispatchRecv/combineSend chain in `run_pipeline_a5.py`. Include every F, including zero-route F, and inspect its real owner/control mapping rather than guessing remote addresses.
+3. Validate combineRecv on a genuinely concurrent stream. For multiple slots and rounds use its round-step driver; only real return consumption can release Ledger and credit. Do not make dispatchSend clear Ledger itself.
 4. Use AFDBuffer.dispatchSend with its exact public out arguments. Assert final send_status PUBLISHED can precede final Consumed. Wait for both consumers before owner destruction. Snapshot checker inputs must be sliced by Ledger.token_begin/num_round_tokens.
 5. Run plan L0-01..07 first, then L1 and L2. Delay ACK/one jetty/Ledger independently, force SQ wrap, test empty members and cross-transaction persistent state. Use an external all-process watchdog for faults.
 6. Only after functional verification measure maximum-rank elapsed time with device events plus cross-rank completion. Report actual transmitted bytes separately from reserved memory and workspace; no performance result is available now.
@@ -88,7 +161,7 @@ The script constructs the actual AFDBuffer on A=0/F=1, calls the actual JIT disp
 
 This is deliberately a single invocation. No ACK is fabricated, no slot is reused and no Ledger is released. All work is synchronized before explicit resource destruction. It proves neither the live Ready visibility ordering nor ACK, replay, multi-round, multiple members or concurrent progress. It was only AST checked in the current CPU environment; toolchain/API execution remains unverified.
 
-For a future F receiver, the current context peer table lists F destinations only. F does not have an A control destination mapping through that table; extend the agreed receiver resource contract before implementing Consumed writes. This is a known follow-on interface gap, not something this smoke bypasses by guessing a pointer.
+The single-round snapshot smoke intentionally does not drive reverse-channel ACKs. The implemented five-operator path obtains A destinations through the version-1 return-directory extension and its source-peer table; it must be exercised through the pipeline harness above.
 # Native-logic restoration regression matrix
 
 `run_reuse_a5.py` invokes the actual local-F `dispatchRecv` kernel. It requires
@@ -127,8 +200,8 @@ exercise masked tokens with invalid topk sentinels inside metadata batches and
 all-masked no-route publication. This harness synchronizes A
 before constructing F Active; it does not validate async visibility, ACK reuse,
 online scheduler behavior, or graph replay. The existing single-round sender
-entry also uses exactly two ranks (A=0/F=1); multi-F execution still requires a
-separate hardware harness. These short single-call cases do not exercise actual
+entry also uses exactly two ranks (A=0/F=1); multi-F execution is provided by the
+four-rank pipeline harness above but still requires hardware validation. These short single-call cases do not exercise actual
 SQ wrap; a long-running/cross-wrap device test remains pending. No C++ compilation or hardware results are
 implied by the CPU fixture/oracle tests (`test_reuse_cpu.py`).
 The final 16-core run covers more cores than the nine rank/expert prefix columns

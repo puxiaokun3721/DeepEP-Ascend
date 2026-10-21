@@ -10,8 +10,9 @@ struct alignas(32) AFDSchedulerState {
 struct alignas(32) AFDPendingLane {
     uint32_t valid, expected_input_bit, grant_state, member_leader;
     uint64_t first_seen;
-    // Private per-invocation scratch in former reserved bytes; rebuilt on replay.
-    uint32_t num_group_members, reserved;
+    // Private membership count is rebuilt per invocation. Remaining routes are
+    // initialized from Ready counts and reduced only by validated Completion.
+    uint32_t num_group_members, num_remaining_routes;
     AFDInbox inbox;
 };
 constexpr uint64_t scheduler_pending_offset() { return 32; }

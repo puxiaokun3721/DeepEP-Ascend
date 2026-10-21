@@ -279,12 +279,20 @@ __global__ __vector__ void dispatch_impl(
         if(lanes[l].src_rank_idx==task_info->src_rank_idx && lanes[l].payload_slot_idx==task_info->payload_slot_idx) lane_idx=l;
     if(vec_core_idx==0) {
         uint32_t code=OK;
-        if(context->abi_version!=kAbiVersion || task_info->abi_version!=kAbiVersion) code=BAD_ABI;
+        if(context->abi_version!=kAbiVersion || task_info->abi_version!=kAbiVersion ||
+            context->return_progress_mode>RETURN_ROUND_STEP) code=BAD_ABI;
         else if(lane_idx==context->num_source_lanes || task_info->src_rank_idx!=context->src_rank_idx ||
             task_info->num_tokens>context->num_token_capacity || task_info->num_comm_rounds==0) code=BAD_TASK;
         else {
             const uint32_t c=lanes[lane_idx].capacity;
             if(task_info->num_comm_rounds<(uint64_t(task_info->num_tokens)+c-1)/c) code=BAD_TASK;
+            // [AFD] A blocking per-transaction recv cannot fairly release other slots.
+            // Reject the unsafe family before any payload, Inbox or Ready publication.
+            uint32_t num_local_lanes=0;
+            for(uint32_t l=0;l<context->num_source_lanes;++l)
+                num_local_lanes+=lanes[l].src_rank_idx==context->src_rank_idx;
+            if(code==OK && context->return_progress_mode==RETURN_TRANSACTION && num_local_lanes>1 &&
+                task_info->num_comm_rounds>1) code=BAD_TASK;
             bool valid_layer=false;
             for(uint32_t i=0;i<context->num_layers;++i) valid_layer|=layers[i]==task_info->layer_idx;
             if(!valid_layer) code=BAD_LAYER;

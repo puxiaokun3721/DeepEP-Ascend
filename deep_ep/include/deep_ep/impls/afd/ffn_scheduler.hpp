@@ -62,21 +62,30 @@ __aicore__ inline bool scheduler_ready(int leader,__gm__ const AFDLane* lanes,
     if(!p.valid) return false;
     for(int i=0;i<leader;++i)
         if(scheduler_same(a,p,recv_read(lanes+i),recv_read(pending+i))) return false;
-    bool complete=true;
+    bool has_routes=false;
     uint32_t matches=0;
     for(int j=0;j<L;++j) {
         auto b=recv_read(lanes+j);auto q=recv_read(pending+j);
         if(!scheduler_same(a,p,b,q))continue;
         ++matches;
-        if constexpr(PRECHECK) {
+        has_routes|=q.num_remaining_routes!=0;
+    }
+    if(matches!=p.num_group_members || error!=OK) return false;
+    // AFD CONTROL has no useful compute to overlap. A missing credit must not
+    // pin the single Active/workspace, even under COMPUTE_AHEAD. A member with
+    // zero routes in a nonempty DP entry is not a separate CONTROL entry.
+    if(PRECHECK || !has_routes) {
+        for(int j=0;j<L;++j) {
+            auto b=recv_read(lanes+j);auto q=recv_read(pending+j);
+            if(!scheduler_same(a,p,b,q))continue;
             if(q.grant_state!=HELD) {
                 auto ret=recv_read(returns+j);
                 recv_load(tmp,control+ret.credit_offset,32);
-                if(*reinterpret_cast<__ubuf__ uint32_t*>(tmp)!=q.inbox.return_bit)complete=false;
+                if(*reinterpret_cast<__ubuf__ uint32_t*>(tmp)!=q.inbox.return_bit)return false;
             }
         }
     }
-    return complete && matches==p.num_group_members && error==OK;
+    return true;
 }
 
 template<int N,int E,int K,int L,int NL,int Q,int QA,int A,bool PRECHECK>
@@ -137,7 +146,12 @@ __global__ __vector__ void ffn_scheduler_impl(
             recv_load(reinterpret_cast<__ubuf__ uint8_t*>(counts),totals+uint64_t(m.source_lane_idx)*R,4*R);
             recv_load(reinterpret_cast<__ubuf__ uint8_t*>(consumed),cursors+uint64_t(m.source_lane_idx)*R,4*R);
             recv_load(reinterpret_cast<__ubuf__ uint8_t*>(delta),cd+m.delta_begin,4*R);
-            for(int e=0;e<R;++e) if(consumed[e]>counts[e] || delta[e]>counts[e]-consumed[e]) error=BAD_ROUTE;
+            uint64_t remaining=0;
+            for(int e=0;e<R;++e) {
+                if(consumed[e]>counts[e] || delta[e]>counts[e]-consumed[e]) error=BAD_ROUTE;
+                else remaining+=counts[e]-consumed[e];
+            }
+            if(error==OK && remaining!=p.num_remaining_routes)error=STATE_ORDER;
         }
         uint32_t next_member=0;
         for(uint32_t i=0;i<done.num_entries && error==OK;++i) {
@@ -165,7 +179,7 @@ __global__ __vector__ void ffn_scheduler_impl(
                 auto m=recv_read(cm+ent.member_begin+j);auto p=recv_read(pending+m.source_lane_idx);
                 recv_load(reinterpret_cast<__ubuf__ uint8_t*>(consumed),cursors+uint64_t(m.source_lane_idx)*R,4*R);
                 recv_load(reinterpret_cast<__ubuf__ uint8_t*>(delta),cd+m.delta_begin,4*R);
-                for(int e=0;e<R;++e) consumed[e]+=delta[e];
+                for(int e=0;e<R;++e) {consumed[e]+=delta[e];p.num_remaining_routes-=delta[e];}
                 recv_store(cursors+uint64_t(m.source_lane_idx)*R,reinterpret_cast<__ubuf__ uint8_t*>(consumed),4*R);
                 p.grant_state=ent.grant_state;
                 if(ent.grant_state==FINISHED) {p.valid=0;p.grant_state=NONE;p.expected_input_bit^=1;}
@@ -211,7 +225,8 @@ __global__ __vector__ void ffn_scheduler_impl(
         if(total>uint64_t(p.inbox.num_round_tokens)*K) {error=BAD_ROUTE;break;}
         recv_store(totals+uint64_t(i)*R,reinterpret_cast<__ubuf__ uint8_t*>(counts),4*R);
         recv_store(cursors+uint64_t(i)*R,reinterpret_cast<__ubuf__ uint8_t*>(consumed),4*R);
-        p.valid=1;p.grant_state=NONE;p.first_seen=state.tick;scheduler_write(pending+i,p,tmp);
+        p.valid=1;p.grant_state=NONE;p.num_remaining_routes=uint32_t(total);
+        p.first_seen=state.tick;scheduler_write(pending+i,p,tmp);
     }
     if(error==OK)scheduler_index_members<L>(lanes,pending,error);
     // Phase fairness: choose oldest ready alternative phase after every committed selection.
