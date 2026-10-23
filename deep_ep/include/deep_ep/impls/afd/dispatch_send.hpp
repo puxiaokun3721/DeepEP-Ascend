@@ -157,6 +157,13 @@ struct WriteTask {
     uint64_t peer_info_addr,remote_offset,src_addr,metadata_addr;
     uint32_t num_hidden_bytes,num_metadata_bytes;
 };
+static_assert(sizeof(WriteTask)==40);
+static_assert(offsetof(WriteTask,peer_info_addr)==0);
+static_assert(offsetof(WriteTask,remote_offset)==8);
+static_assert(offsetof(WriteTask,src_addr)==16);
+static_assert(offsetof(WriteTask,metadata_addr)==24);
+static_assert(offsetof(WriteTask,num_hidden_bytes)==32);
+static_assert(offsetof(WriteTask,num_metadata_bytes)==36);
 static_assert(sizeof(WriteTask)*kNumWritesPerTask<=512);
 
 template <int kNumSGEs>
@@ -172,7 +179,13 @@ void issue_write_wqe(__ubuf__ const WriteTask* tasks,const uint64_t sq_base_addr
     const auto token_idx=thread_idx/warpSize;
     const auto lane_idx=thread_idx%warpSize;
     if(token_idx<num_tokens && lane_idx<kNumWQEWords) {
-        const auto task=tasks[token_idx];
+        WriteTask task{};
+        task.peer_info_addr=tasks[token_idx].peer_info_addr;
+        task.remote_offset=tasks[token_idx].remote_offset;
+        task.src_addr=tasks[token_idx].src_addr;
+        task.metadata_addr=tasks[token_idx].metadata_addr;
+        task.num_hidden_bytes=tasks[token_idx].num_hidden_bytes;
+        task.num_metadata_bytes=tasks[token_idx].num_metadata_bytes;
         const auto peer_info_words=reinterpret_cast<__ubuf__ const uint64_t*>(task.peer_info_addr);
         const auto token_sqebb_idx=task_sqebb_idx+token_idx*kNumWQEBBsPerToken;
         uint64_t wqe_word=0;
@@ -231,8 +244,14 @@ __aicore__ inline void append_write_task(handle::HcommJetty& jetty,const handle:
     EP_DEVICE_ASSERT(num_hidden_bytes>0 && bytes<=UINT32_MAX);
     EP_DEVICE_ASSERT(offset<=peer.peer_info->rmt_buffer_size && bytes<=peer.peer_info->rmt_buffer_size-offset);
     auto tasks=reinterpret_cast<__ubuf__ WriteTask*>(jetty.ub_sqe);
-    tasks[num_tokens++]={reinterpret_cast<uint64_t>(peer.peer_info),offset,
-        reinterpret_cast<uint64_t>(x),reinterpret_cast<uint64_t>(metadata_send_buffer),num_hidden_bytes,num_metadata_bytes};
+    auto task=tasks+num_tokens;
+    task->peer_info_addr=reinterpret_cast<uint64_t>(peer.peer_info);
+    task->remote_offset=offset;
+    task->src_addr=reinterpret_cast<uint64_t>(x);
+    task->metadata_addr=reinterpret_cast<uint64_t>(metadata_send_buffer);
+    task->num_hidden_bytes=num_hidden_bytes;
+    task->num_metadata_bytes=num_metadata_bytes;
+    ++num_tokens;
     if(num_tokens==kNumWritesPerTask)issue_write_task<kNumSGEs,kNumTimeoutCycles>(jetty,num_tokens,inflight);
 }
 
