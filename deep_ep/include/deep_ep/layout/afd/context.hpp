@@ -1,11 +1,12 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <deep_ep/common/compiled.hpp>
 
 // ### PATCH START: AFD wire ABI, based on DeepEP 3b25377d
 namespace deep_ep::afd {
-constexpr uint64_t align32(uint64_t n) { return (n + 31) / 32 * 32; }
-constexpr uint64_t align512(uint64_t n) { return (n + 511) / 512 * 512; }
+constexpr __aicore__ __forceinline__ uint64_t align32(uint64_t n) { return (n + 31) / 32 * 32; }
+constexpr __aicore__ __forceinline__ uint64_t align512(uint64_t n) { return (n + 511) / 512 * 512; }
 constexpr uint32_t kAbiVersion = 1;
 // Current implementation-family bound per lane/physical slot, never a DP aggregate bound.
 constexpr uint32_t kMaxLaneTokens = 32768;
@@ -67,7 +68,7 @@ static_assert(sizeof(AFDLane)==32 && sizeof(AFDPeer)==32 && sizeof(AFDAddress)==
 static_assert(sizeof(AFDWorkspace)==96 && sizeof(AFDContextLayout)==224);
 static_assert(offsetof(AFDContextLayout,workspace)==128);
 static_assert(offsetof(AFDContextLayout,return_progress_mode)==60);
-constexpr AFDWorkspace make_workspace(uint32_t c, uint32_t t, uint32_t k,
+constexpr __aicore__ __forceinline__ AFDWorkspace make_workspace(uint32_t c, uint32_t t, uint32_t k,
                                       uint32_t e, uint32_t n, uint32_t m, uint32_t slots) {
     AFDWorkspace w{}; uint64_t p=0, j=(uint64_t(c)+t-1)/t;
     w.dst_buffer_slot_idx=p; p+=align32(uint64_t(4)*c*k);

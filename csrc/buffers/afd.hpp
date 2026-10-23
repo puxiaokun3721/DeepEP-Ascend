@@ -141,7 +141,7 @@ public:
         const auto available_ub=runtime->get_num_ubuf_bytes_per_vec_core();
         EP_HOST_ASSERT(available_ub>0 && available_ub<=INT_MAX);
         num_ub_bytes=int(available_ub);
-        timeout_cycles=int64_t(num_gpu_timeout_secs)*kNumSystemCyclesPerSecond;
+        timeout_cycles=int64_t(num_gpu_timeout_secs)*comm::kNumSystemCyclesPerSecond;
         const TokenLayout token{uint64_t(hidden)*(use_fp8?1:2),uint64_t(num_sf_packs)*2,uint64_t(num_topk)};
         EP_HOST_ASSERT(token.num_hidden_bytes<=INT_MAX && token.metadata_stride()<=INT_MAX);
         const uint64_t m=token.metadata_stride(),d=token.record_stride();
