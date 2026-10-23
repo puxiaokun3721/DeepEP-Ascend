@@ -23,7 +23,7 @@ static void launch_compute_ready(void* active,void* execution,int ub) {
 #include <deep_ep/impls/afd/ffn_scheduler.hpp>
 using namespace deep_ep::afd;
 static void __instantiate_kernel() {
- auto ptr=reinterpret_cast<void*>(&mark_compute_ready_impl);
+ auto ptr=reinterpret_cast<void*>(&mark_compute_ready_impl<0>);
 }
 )");
     jit->launch(kernel,{.num_blocks=1,.num_ubuf_bytes=ub},active,execution);

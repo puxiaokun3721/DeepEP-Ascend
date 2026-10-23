@@ -301,6 +301,7 @@ __global__ __vector__ void ffn_scheduler_impl(
 }
 
 // Same-stream bridge after actual GMM2; it does not execute or stand in for GMM.
+template<int kDummy>
 __global__ __vector__ void mark_compute_ready_impl(__gm__ const AFDActive* active,__gm__ AFDExecutionState* execution_state) {
     AscendC::InitSocState();if(AscendC::GetBlockIdx()!=0) return;
     auto task=recv_read(active);if(!task.valid || task.kind==ABORT || task.kind==NOP) return;
