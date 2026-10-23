@@ -6,7 +6,7 @@
 namespace deep_ep::afd {
 // Reuse the pinned-port DMA/cache helpers, not a second memory-ordering implementation.
 template<class T> __aicore__ inline void scheduler_write(__gm__ T* dst,const T& value,__ubuf__ uint8_t* tmp) {
-    *reinterpret_cast<__ubuf__ T*>(tmp)=value;
+    ub_store(tmp,value);
     recv_store(dst,tmp,sizeof(T));
 }
 __aicore__ inline bool scheduler_same(const AFDLane& a,const AFDPendingLane& p,
@@ -212,7 +212,7 @@ __global__ __vector__ void ffn_scheduler_impl(
         if(*reinterpret_cast<__ubuf__ uint32_t*>(tmp)!=p.expected_input_bit) continue;
         auto lane=recv_read(lanes+i);
         recv_load(tmp,control+address.inbox_offset,64);
-        p.inbox=*reinterpret_cast<__ubuf__ AFDInbox*>(tmp);
+        p.inbox=ub_load<AFDInbox>(tmp);
         if(!p.inbox.num_comm_rounds || p.inbox.round_idx>=p.inbox.num_comm_rounds || p.inbox.return_bit>1 ||
            p.inbox.num_round_tokens>lane.capacity || p.inbox.num_recv_records>p.inbox.num_round_tokens) {error=BAD_TASK;break;}
         bool layer_ok=false;
