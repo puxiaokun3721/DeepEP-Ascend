@@ -11,6 +11,7 @@
 #include <vector>
 #include <cstdint>
 #include <optional>
+#include <cstdio> // ### DIAG r3-a2: host observation, removable
 
 #include <acl/acl.h>
 #include <hccl/hccl.h>
@@ -27,6 +28,13 @@
 
 namespace deep_ep {
 
+// ### DIAG START: r3-a2 host observation, removable
+static inline long long afd_diag_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+// ### DIAG END
+
 struct HCCLContext {
     std::shared_ptr<symmetric::SymmetricMemory> memory;
     HcclComm comm = nullptr;
@@ -35,6 +43,9 @@ struct HCCLContext {
 
     int num_ranks = 0;
     int rank_idx = 0;
+    // ### DIAG START: r3-a2 host observation, removable
+    int diag_buffer_idx = -1;
+    // ### DIAG END
     std::vector<int64_t> peer_ptrs;
     // ### PATCH START: AFD independent registration lengths
     std::vector<uint64_t> peer_buffer_bytes;
@@ -73,6 +84,7 @@ struct HCCLContext {
         // All ranks must create buffers in the same order within each group.
         static std::unordered_map<std::string, int> context_idx_per_group;
         const auto buffer_idx = context_idx_per_group[hccl_group_name] ++;
+        diag_buffer_idx = buffer_idx; // ### DIAG r3-a2
         const auto buffer_uid = "deep_ep/" + hccl_group_name + "/" + std::to_string(buffer_idx);
 
         // Share the allocation when registering the same storage with another group.
@@ -100,6 +112,22 @@ struct HCCLContext {
             uint32_t* layers = nullptr;
             uint32_t num_layers = 0;
             HCCL_CHECK(HcclRankGraphGetLayers(comm, &layers, &num_layers));
+            // ### DIAG START: r3-a2 host observation, removable
+            {
+                char afd_layers_dump[256];
+                int afd_off = 0;
+                afd_layers_dump[0] = '\0';
+                for (uint32_t afd_i = 0; afd_i < num_layers and afd_off < 200; ++ afd_i)
+                    afd_off += std::snprintf(afd_layers_dump + afd_off, sizeof(afd_layers_dump) - afd_off,
+                                             afd_i == 0 ? "%u" : ",%u", layers[afd_i]);
+                std::fprintf(stderr, "[AFD-DIAG r3a2] t_ms=%lld rank=%d bufidx=%d stage=GetLayers num_layers=%u layers=[%s]\n",
+                             afd_diag_ms(), rank_idx, diag_buffer_idx, num_layers, afd_layers_dump);
+                if (num_layers > 1)
+                    std::fprintf(stderr, "[AFD-DIAG r3a2] t_ms=%lld rank=%d bufidx=%d stage=GetLayers selected_layers1=%u\n",
+                                 afd_diag_ms(), rank_idx, diag_buffer_idx, layers[1]);
+                std::fflush(stderr);
+            }
+            // ### DIAG END
             EP_HOST_ASSERT(num_layers > 1);
             // HCCL owns `layers` and subsequent calls may invalidate it, so copy the layer value immediately.
             const auto layer = layers[1];
@@ -138,11 +166,28 @@ private:
         CommLink* links = nullptr;
         uint32_t num_links = 0;
         HCCL_CHECK(HcclRankGraphGetLinks(comm, layer, rank_idx, peer_rank_idx, &links, &num_links));
+        // ### DIAG START: r3-a2 host observation, removable
+        std::fprintf(stderr, "[AFD-DIAG r3a2] t_ms=%lld rank=%d bufidx=%d stage=GetLinks peer=%d layer=%u num_links=%u\n",
+                     afd_diag_ms(), rank_idx, diag_buffer_idx, peer_rank_idx, layer, num_links);
+        for (uint32_t afd_di = 0; afd_di < num_links; ++ afd_di) {
+            std::fprintf(stderr, "[AFD-DIAG r3a2] t_ms=%lld rank=%d bufidx=%d stage=GetLinks link[%u] proto=%d src_proto=%d dst_proto=%d\n",
+                         afd_diag_ms(), rank_idx, diag_buffer_idx, afd_di,
+                         static_cast<int>(links[afd_di].linkAttr.linkProtocol),
+                         static_cast<int>(links[afd_di].srcEndpointDesc.protocol),
+                         static_cast<int>(links[afd_di].dstEndpointDesc.protocol));
+        }
+        std::fflush(stderr);
+        // ### DIAG END
         for (uint32_t i = 0; i < num_links; ++ i) {
             const auto& link = links[i];
             const auto proto = link.linkAttr.linkProtocol;
             if (not accept(proto))
                 continue;
+            // ### DIAG START: r3-a2 host observation, removable
+            std::fprintf(stderr, "[AFD-DIAG r3a2] t_ms=%lld rank=%d bufidx=%d stage=GetLinks selected_index=%u proto=%d peer=%d layer=%u\n",
+                         afd_diag_ms(), rank_idx, diag_buffer_idx, i, static_cast<int>(proto), peer_rank_idx, layer);
+            std::fflush(stderr);
+            // ### DIAG END
 
             HcclChannelDesc desc;
             HcclChannelDescInit(&desc, 1);
@@ -189,9 +234,31 @@ private:
             "no UB_MEM link to peer on the chosen layer");
 
         std::vector<ChannelHandle> channels(descs.size(), 0);
-        HCCL_CHECK(HcclChannelAcquire(comm, CommEngine::COMM_ENGINE_AIV,
+        // ### DIAG START: r3-a2 host observation, removable
+        std::fprintf(stderr, "[AFD-DIAG r3a2] t_ms=%lld rank=%d bufidx=%d stage=ChannelAcquire engine=AIV num_descs=%u num_bytes=%lld\n",
+                     afd_diag_ms(), rank_idx, diag_buffer_idx, static_cast<uint32_t>(descs.size()),
+                     static_cast<long long>(num_bytes));
+        for (size_t afd_di = 0; afd_di < descs.size(); ++ afd_di) {
+            const auto& afd_d = descs[afd_di];
+            std::fprintf(stderr, "[AFD-DIAG r3a2] t_ms=%lld rank=%d bufidx=%d stage=ChannelAcquire desc[%zu] remoteRank=%u channelProtocol=%d notifyNum=%u memHandleNum=%u localProto=%d remoteProto=%d localLocType=%d remoteLocType=%d localAddrType=%d remoteAddrType=%d\n",
+                         afd_diag_ms(), rank_idx, diag_buffer_idx, afd_di,
+                         afd_d.remoteRank, static_cast<int>(afd_d.channelProtocol), afd_d.notifyNum, afd_d.memHandleNum,
+                         static_cast<int>(afd_d.localEndpoint.protocol), static_cast<int>(afd_d.remoteEndpoint.protocol),
+                         static_cast<int>(afd_d.localEndpoint.loc.locType), static_cast<int>(afd_d.remoteEndpoint.loc.locType),
+                         static_cast<int>(afd_d.localEndpoint.commAddr.type), static_cast<int>(afd_d.remoteEndpoint.commAddr.type));
+        }
+        std::fflush(stderr);
+        const auto afd_acq_t0 = std::chrono::steady_clock::now();
+        const auto afd_acq_rc = HcclChannelAcquire(comm, CommEngine::COMM_ENGINE_AIV,
                                       descs.data(), static_cast<uint32_t>(descs.size()),
-                                      channels.data()));
+                                      channels.data());
+        const auto afd_acq_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - afd_acq_t0).count();
+        std::fprintf(stderr, "[AFD-DIAG r3a2] t_ms=%lld rank=%d bufidx=%d stage=ChannelAcquireDone rc=%d elapsed_ms=%lld\n",
+                     afd_diag_ms(), rank_idx, diag_buffer_idx, static_cast<int>(afd_acq_rc), static_cast<long long>(afd_acq_ms));
+        std::fflush(stderr);
+        // ### DIAG END
+        HCCL_CHECK(afd_acq_rc);
 
         // The last remote mem is the registered userbuffer.
         for (size_t i = 0; i < descs.size(); ++ i) {
