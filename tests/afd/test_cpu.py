@@ -30,10 +30,21 @@ def parse_structs(text):
                 if match[2]:
                     field_type *= int(match[2])
                 fields.append((match[1], field_type))
-        typ = type(name, (ctypes.LittleEndianStructure,), {'_fields_': fields})
-        # All current wire structs have explicit padding to their 32B boundary.
-        if ctypes.sizeof(typ) % 32:
-            raise ValueError(f'{name}: explicit wire padding missing')
+        # ctypes does not inherit C++ alignas(32) for nested wire structures.
+        # Materialize that padding so both member offsets and tail size match.
+        aligned_fields = []
+        cursor = 0
+        for field_name, field_type in fields:
+            alignment = 32 if field_type in result.values() else ctypes.alignment(field_type)
+            padding = (-cursor) % alignment
+            if padding:
+                aligned_fields.append((f'_padding_{len(aligned_fields)}', ctypes.c_uint8 * padding))
+                cursor += padding
+            aligned_fields.append((field_name, field_type))
+            cursor += ctypes.sizeof(field_type)
+        if cursor % 32:
+            aligned_fields.append(('_tail_padding', ctypes.c_uint8 * ((-cursor) % 32)))
+        typ = type(name, (ctypes.LittleEndianStructure,), {'_fields_': aligned_fields})
         types[name] = typ
         result[name] = typ
     return result
@@ -64,18 +75,20 @@ class ABIContract(unittest.TestCase):
         expected = {'AFDControlBlock':32, 'AFDTaskInfo':64, 'AFDInbox':64,
                     'AFDRoundLedger':64, 'AFDSendState':32, 'AFDLane':32,
                     'AFDPeer':32, 'AFDAddress':64, 'AFDWorkspace':96,
-                    'AFDContextLayout':224}
+                    'AFDContextLayout':256}
         for name, size in expected.items():
             with self.subTest(name=name):
                 self.assertEqual(ctypes.sizeof(types[name]), size)
-        self.assertEqual(types['AFDContextLayout'].workspace.offset, 128)
+        self.assertEqual(types['AFDContextLayout'].workspace.offset, 160)
+        self.assertEqual(types['AFDContextLayout'].channel_stride.offset, 64)
+        self.assertEqual(types['AFDContextLayout'].lanes_offset.offset, 72)
         self.assertEqual(types['AFDPeer'].control_base.offset, 16)
         self.assertEqual(types['AFDInbox'].num_recv_records.offset, 24)
         self.assertEqual(types['AFDTaskInfo'].num_comm_rounds.offset, 24)
         self.assertEqual(types['AFDSendState'].last_input_bit.offset, 12)
         task = types['AFDTaskInfo']()
-        task.abi_version, task.num_comm_rounds = 1, 7
-        self.assertEqual(bytes(task), struct.pack('<16I', 1,0,0,0,0,0,7,*([0]*9)))
+        task.abi_version, task.num_comm_rounds = 2, 7
+        self.assertEqual(bytes(task), struct.pack('<16I', 2,0,0,0,0,0,7,*([0]*9)))
 
     def test_implementation_workspace_against_independent_budget(self):
         for c in (1,32,256,32768):

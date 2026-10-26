@@ -145,7 +145,7 @@ class ReturnProgressTests(unittest.TestCase):
     def test_current_wire_sizes_and_progress_memory_are_explicit(self):
         folder = ROOT/'deep_ep/include/deep_ep/layout/afd'
         types = parse_structs((folder/'context.hpp').read_text(encoding='utf-8') + (folder/'return.hpp').read_text(encoding='utf-8'))
-        self.assertEqual(ctypes.sizeof(types['AFDContextLayout']), 224)
+        self.assertEqual(ctypes.sizeof(types['AFDContextLayout']), 256)
         self.assertEqual(types['AFDContextLayout'].return_progress_mode.offset, 60)
         self.assertEqual(ctypes.sizeof(types['AFDReturnProgress']), 96)
         self.assertEqual(types['AFDReturnProgress'].state.offset, 64)

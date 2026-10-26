@@ -1,0 +1,48 @@
+{
+  "evidence_commit": "7168206322f6e003cb6a2352bd1c490776b55304",
+  "source": "executor source-delivery-016 environment.md; reported versions, not independently installed on Windows",
+  "architecture": "linux/aarch64",
+  "os": "openEuler 24.03 LTS-SP4",
+  "device": "Ascend950DT V120 / dav-3510",
+  "image": {
+    "tag": "vllm-ascend:dev-26.2.0.day20261010-A5-py311-openEuler24.03-lts-aarch64",
+    "id": "sha256:e56beaef0c95ec1e5768e6f3effa1af0b456e881a034996ef6c20fecf34d09c7",
+    "repo_digest": null
+  },
+  "versions": {
+    "python": "3.11.10",
+    "pip": "24.0",
+    "torch": "2.10.0 (CPU build; full wheel suffix not provided)",
+    "torch_npu": "2.10.0.post7",
+    "cann_toolkit": "9.2.0",
+    "cann_opp": "9.2.0",
+    "bisheng": "clang 15.0.5, build 2026-09-30",
+    "atb_nnal": "9.2.0",
+    "gcc": "14.3.1",
+    "driver": "25.6.rc2",
+    "ascendhal": "7.35.23",
+    "firmware": "7.0.9.100.203"
+  },
+  "paths": {
+    "cann": "/usr/local/Ascend/cann-9.2.0",
+    "gcc_bin": "/opt/openEuler/gcc-toolset-14/root/usr/bin",
+    "gcc_lib": "/opt/openEuler/gcc-toolset-14/root/usr/lib64"
+  },
+  "mount_classes": {
+    "/work": "task-private bind; source/build/JIT/results outside image",
+    "/usr/local/Ascend/driver": "host read-only bind",
+    "/usr/local/dcmi": "host read-only bind",
+    "/usr/slog": "host log bind",
+    "/etc/hccl_rootinfo.json": "host read-only configuration; recreate on target, do not publish",
+    "/etc/hccn.conf": "host read-only configuration; recreate on target, do not publish",
+    "/etc/hixlep": "host read-only configuration; recreate on target, do not publish",
+    "CANN/Python/torch/torch_npu/system-libraries": "executor reports image filesystem, no Docker volumes"
+  },
+  "image_exported": false,
+  "missing_for_clean_room_rebuild": [
+    "precise offline wheel filenames and SHA256",
+    "offline CANN installer artifact SHA256",
+    "complete pip lock (not provided)",
+    "image writable-layer audit before redistribution"
+  ]
+}

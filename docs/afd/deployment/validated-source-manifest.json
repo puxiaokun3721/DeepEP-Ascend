@@ -1,0 +1,995 @@
+{
+  "schema": 1,
+  "base_commit": "57b9daf58c473582883ab2c73894d97dcbc92250",
+  "site_snapshot_commit": "21e1b2380c6add42be64f173d064d3fb6d3e3165",
+  "anchor_run": "prod_teardown4_20261026T052009",
+  "validation_repository": "https://github.com/puxiaokun3721/afd-a5-validation",
+  "source_delivery_commit": "7168206322f6e003cb6a2352bd1c490776b55304",
+  "gap_delivery_commit": "de1643edf8fbd5310285b033a7cd2646d5398474",
+  "acceptance_commit": "ddb96369e644e2848e6cbafb6ef7d31126b4632e",
+  "site_runtime_so_sha256_reported": "87c51bccbdc926d9bb31b339dba897fad30d87440910db97838a2b53debca145",
+  "identity_scope": "18 final snapshot files independently reconstructed/received and SHA256 matched; earlier scheduler/dispatchRecv source reused from verified chain; all 102 DeepJIT file blobs matched site ls-tree. Other unchanged source bytes are pinned by base commit. Host binary was not locally recomputed; Windows verification is not a new hardware run.",
+  "deepjit": {
+    "base_commit": "65f513952b8771408a19202f65e36398522db6db",
+    "site_subtree": "c6ad4e84bba90ceb44c50c2678dab65758bf4564",
+    "packaging": "Pinned submodule plus three content patches and one test executable-bit restoration; site flattened the same 102 files.",
+    "independently_recomputed_tree": "c6ad4e84bba90ceb44c50c2678dab65758bf4564"
+  },
+  "files": [
+    {
+      "path": ".gitmodules",
+      "bytes": 244,
+      "sha256": "38918c99d3956fca48bc3daf82073d8418faae1447a92ea2a41e468d3ee6205b"
+    },
+    {
+      "path": "csrc/buffers/afd.hpp",
+      "bytes": 53004,
+      "sha256": "ef8190705110d46fe2faa6ec678ee42b322d9672bf6b6c34753a6fe9af7b6397"
+    },
+    {
+      "path": "csrc/buffers/base.hpp",
+      "bytes": 2436,
+      "sha256": "48276bcad57dea9783d52071eaeb7f4b5a2632c628169cdb510eabded2d1653d"
+    },
+    {
+      "path": "csrc/buffers/bucket.hpp",
+      "bytes": 8103,
+      "sha256": "836eda29c62d9238e83f0b9fbebcc9e0b7d001c9517b6cd7fd0196bdfd11429c"
+    },
+    {
+      "path": "csrc/buffers/engram.hpp",
+      "bytes": 10149,
+      "sha256": "8ffbc2c03ed877575e254ad6f2afedf35b57baa97cb058a5a03ecb37ead64f83"
+    },
+    {
+      "path": "csrc/buffers/ep.hpp",
+      "bytes": 31082,
+      "sha256": "8dd45812f46bcec306b937a9aeb8238d9e57554964cddfe056d998b3ab015b7d"
+    },
+    {
+      "path": "csrc/buffers/pp.hpp",
+      "bytes": 4077,
+      "sha256": "eb8fd578192707e1e1eb8324721366dc9732708416891c6829c602789b9e41b9"
+    },
+    {
+      "path": "csrc/comm/api.hpp",
+      "bytes": 81,
+      "sha256": "ec0f0d41ed1310a9e549f72b72715ede9ea62419dd8948d836f84fa0ff95acd9"
+    },
+    {
+      "path": "csrc/comm/barrier.hpp",
+      "bytes": 1098,
+      "sha256": "07d806707b1ebbb2afc4ee7be96fab99bbba0e33d542ffb5629326f112359719"
+    },
+    {
+      "path": "csrc/comm/handle.hpp",
+      "bytes": 3870,
+      "sha256": "25284784187516b1479a277dbe970fb4ab19dd0ee9b252c488f0ffcebce65718"
+    },
+    {
+      "path": "csrc/comm/stream.hpp",
+      "bytes": 750,
+      "sha256": "7717be06fc12c086146edb4bd20b04e290674eb51b2f8f7dcfcc5733e1746f5b"
+    },
+    {
+      "path": "csrc/indexing/main.cpp",
+      "bytes": 540,
+      "sha256": "5566c07909612ff1bda9c650911e1ddd04e677c01e1df35a8cac5e2968f4efac"
+    },
+    {
+      "path": "csrc/kernels/afd/dispatch.hpp",
+      "bytes": 4065,
+      "sha256": "1276ae2c7b240cb136b0ccc620b5e09eb7b6362cbfbb63cceff6533976fff2fe"
+    },
+    {
+      "path": "csrc/kernels/afd/remaining.hpp",
+      "bytes": 5914,
+      "sha256": "916f977cfa23e749aad2326926628c90411bcacb6500938b5cad8695d90ed0d0"
+    },
+    {
+      "path": "csrc/kernels/bucket/all_gather.hpp",
+      "bytes": 1443,
+      "sha256": "c0473da26950419b23ae7ac69b3d03762fc95f7599a7d2a8670b4da9d6b80251"
+    },
+    {
+      "path": "csrc/kernels/comm/api.hpp",
+      "bytes": 4498,
+      "sha256": "988290b789d9d53e24be81b5c13d036b060c5bcc3f3347100211bd1e1e833b2b"
+    },
+    {
+      "path": "csrc/kernels/comm/barrier.hpp",
+      "bytes": 962,
+      "sha256": "74a21e1e82e7909b6f137148688e30cb82ad21587b86945474c58cdd326988ad"
+    },
+    {
+      "path": "csrc/kernels/comm/hccl.hpp",
+      "bytes": 43441,
+      "sha256": "02b16fd5e4afd74a8491019932b828390b85ed8b0eac47acabb5273bd9379398"
+    },
+    {
+      "path": "csrc/kernels/comm/symmetric.hpp",
+      "bytes": 811,
+      "sha256": "b01ac0ed1cc221a0e730c8f4b1edf971b634e41d3fb42ae1d020a37569cffc9d"
+    },
+    {
+      "path": "csrc/kernels/engram/engram.hpp",
+      "bytes": 2550,
+      "sha256": "a64b22c228ae5c63b02182cf6029ac4dabb7e7af14b0c915b6e26826927d18cd"
+    },
+    {
+      "path": "csrc/kernels/ep/api.hpp",
+      "bytes": 61,
+      "sha256": "34483cd11b316f4ac98dcedb4eba0d614c2fbcf649cc202670ef0b6a3c90b7d5"
+    },
+    {
+      "path": "csrc/kernels/ep/combine.hpp",
+      "bytes": 4367,
+      "sha256": "4e13e6120505255729b5f9373a209ef12478664dadcacec79fd9f57800492188"
+    },
+    {
+      "path": "csrc/kernels/ep/dispatch.hpp",
+      "bytes": 6199,
+      "sha256": "1ce238a18a1e14847fef1ef9bf700fbc6c8baedfeb5a95d440e3ddce6cc05c41"
+    },
+    {
+      "path": "csrc/kernels/pp/pp_send_recv.hpp",
+      "bytes": 2142,
+      "sha256": "e80971c23dc41bbb6e798a944fba06049da444da5f686164f564ff100ee5a5a2"
+    },
+    {
+      "path": "csrc/python_api.cpp",
+      "bytes": 6830,
+      "sha256": "4565b4ba4aa72b792c47ca4f9d108cd4575fee6f1663944957072827c4610536"
+    },
+    {
+      "path": "csrc/runtime/jit.hpp",
+      "bytes": 3442,
+      "sha256": "27e229337ce11fe52aeea0a35c167cceb085bc7cbf240f5d578f6165faa70bda"
+    },
+    {
+      "path": "csrc/utils/event.hpp",
+      "bytes": 592,
+      "sha256": "376e9f34c63af3abf62c2a1d2b43e86ce1a904446b1b7cce70384f689f789318"
+    },
+    {
+      "path": "csrc/utils/tensor.hpp",
+      "bytes": 225,
+      "sha256": "eb21f55f764f6de1b1fd53b62a3edef0356271711273f5a41511611d2e669847"
+    },
+    {
+      "path": "deep_ep/__init__.py",
+      "bytes": 1432,
+      "sha256": "b44c22229866792c0e500f6b70132f2d8ee825b6327bad7f325d161a67ac1ae0"
+    },
+    {
+      "path": "deep_ep/buffers/__init__.py",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "deep_ep/buffers/allocator.py",
+      "bytes": 1489,
+      "sha256": "12c09a924116b36000947dfe3f8500a403fa29200d26bef36d23035d9fc1e1a2"
+    },
+    {
+      "path": "deep_ep/buffers/base.py",
+      "bytes": 953,
+      "sha256": "17e6d1558506839687f6575fb0986f1e3ea110fa0ae1fdcebb10951cea558150"
+    },
+    {
+      "path": "deep_ep/buffers/bucket.py",
+      "bytes": 16576,
+      "sha256": "bdfaf5b2690acee2d4e1753b915eab05cefb8fd12078534f5a75bde43d38a340"
+    },
+    {
+      "path": "deep_ep/buffers/engram.py",
+      "bytes": 7229,
+      "sha256": "7eb15dfb43ffb8565eb0a3ba0f492218d50601e0d5e96ddc90711ecfa3b185be"
+    },
+    {
+      "path": "deep_ep/buffers/ep.py",
+      "bytes": 34558,
+      "sha256": "ece531b7e60ac517a07863799fac2c34432ee3e6dab176c90f648884a4fe281f"
+    },
+    {
+      "path": "deep_ep/buffers/pp.py",
+      "bytes": 3611,
+      "sha256": "bd24491ede5987da603db8dd80609d2a89154221ff3a01727fe86a300291812b"
+    },
+    {
+      "path": "deep_ep/comm/__init__.py",
+      "bytes": 433,
+      "sha256": "77e16674c230e8509d03f1be570fb2c87c690b252c584e1a3be40eb90587f71a"
+    },
+    {
+      "path": "deep_ep/comm/barrier.py",
+      "bytes": 527,
+      "sha256": "9747e816fe07b44c5332f4453bd16a665ff36839ef2c2460f12471097440c347"
+    },
+    {
+      "path": "deep_ep/comm/handle.py",
+      "bytes": 2437,
+      "sha256": "961855d96bd5fbf9e4410690b6d76830cbe9c6b01c35cbb10bca697e0102d272"
+    },
+    {
+      "path": "deep_ep/comm/stream.py",
+      "bytes": 370,
+      "sha256": "d54cd49fd43fcc025be6401adf297c01068a98ec0cdb9f285c0a67eb3e6a5162"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/comm/barrier.hpp",
+      "bytes": 6935,
+      "sha256": "8db96815b9746188dc9ab9a7c7fdbdd4c42754ce52a12a3c9c62065971cba456"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/comm/bucket.hpp",
+      "bytes": 1351,
+      "sha256": "aac16c2bb3849d7a184e33e290ce576426ab09211317c5ba97f1dbc0e6cb8a3a"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/comm/handle.hpp",
+      "bytes": 22574,
+      "sha256": "2abbed589da935512fe76c72b6e74527e99642ad139ebf22726300dfec90143e"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/common/bitset.hpp",
+      "bytes": 1295,
+      "sha256": "b4098a240abe1744b4a50802afad0289c238c6cbd33a0ceef51f3363c2816873"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/common/compiled.hpp",
+      "bytes": 1386,
+      "sha256": "b108c14a11da004311ad71de2388c8e5b629e45d32cab9b15f80eac6e710bda3"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/common/exception.hpp",
+      "bytes": 2346,
+      "sha256": "3a8fa644668079915b40d593c4c70ee12412193007016406c427495be5b4d213"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/common/math.hpp",
+      "bytes": 1132,
+      "sha256": "49ab9e046bbb1aff2b400126d293352e8d04ae88260f486ef02d36ffe560e469"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/common/reduction.hpp",
+      "bytes": 3171,
+      "sha256": "bef3f7b0efa29a9ebd83fdbeb6c9be83ae26e5ea7ad014b8d1c6f6ab2c4aa687"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/common/simt.hpp",
+      "bytes": 1531,
+      "sha256": "9a7e26e46dab5289dc781c59992091f42c6084ba2960534a7fec51d6bc7f8db1"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/common/utils.hpp",
+      "bytes": 2197,
+      "sha256": "d6b87189a002ead8d9b2f09fb48367b076cd9c3de79654f8060c07aea6fbc2c2"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/afd/combine_recv.hpp",
+      "bytes": 19219,
+      "sha256": "15fa0a9156edee1775bbc8cb1572111129fcd5f7a4bf9525c5f62fd561c6b79d"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/afd/combine_send.hpp",
+      "bytes": 17764,
+      "sha256": "bc5988183d21f4aa95e64d965c31d5d3a1cd7ed5831950a8397cea38ebe468ec"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/afd/dispatch_recv.hpp",
+      "bytes": 42108,
+      "sha256": "9c90cde1d839f291e8a618a61e46f9d86694b35a61a5434ee6ba93afbc0cd2c2"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/afd/dispatch_send.hpp",
+      "bytes": 36898,
+      "sha256": "0049a752eccd5e1eb6156e437766b950e5913562eb5fc2c8361ba0ce1c5868c1"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/afd/ffn_scheduler.hpp",
+      "bytes": 24455,
+      "sha256": "2161c3509c30f1d6601474e8bcdbd7ad36601a453d74a597532e793821a26c44"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/afd/queue_meta_probe.hpp",
+      "bytes": 5767,
+      "sha256": "793f0b2a0b0c9c40d8ecbe6d411952ba88e9056a9b5e9692df56945d2f0e5553"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/bucket/all_gather/urma.hpp",
+      "bytes": 2818,
+      "sha256": "e7acc06fa334b97e37362a0fb4429f1aecf0cef1eaae2406a00fe4d782f259b3"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/comm/barrier.hpp",
+      "bytes": 833,
+      "sha256": "345386a222d10fe656028b4f00222e140fd5e4f50369970cfa2ab1a32584babc"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/engram/engram_fetch.hpp",
+      "bytes": 7171,
+      "sha256": "bad484768467be4b6476462e38a31c04e579080b6b0663df952118e41ee3eb78"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/ep/combine.hpp",
+      "bytes": 21096,
+      "sha256": "a260a9170156a3ebf57ee5ed4112b12d46fb19b8b8755335e3238341fb938062"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/ep/combine_reduce_epilogue.hpp",
+      "bytes": 7791,
+      "sha256": "a31cfb740ca655f861f4f1d50a4327541c2e24c6d705bae9f989b177bc7c8a22"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/ep/combine_utils.hpp",
+      "bytes": 9063,
+      "sha256": "4f19040f552a163d79a4738ec726c23e6bc4e61d8d93089b95c269778af6d510"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/ep/dispatch.hpp",
+      "bytes": 47325,
+      "sha256": "25244c66d5937e9e7521400792c2e0ddc974512971f582e95d19c4828c31b678"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/ep/dispatch_copy_epilogue.hpp",
+      "bytes": 32118,
+      "sha256": "3666da791943b16986c7a0258c52cc022361c1a07d364098e0713036bd412a25"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/impls/pp/pp_send_recv.hpp",
+      "bytes": 8160,
+      "sha256": "fd3346800c364ef50f6788e945e75a694b597a44ef2b3225ceb61c27aeeef340"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/afd/active.hpp",
+      "bytes": 3028,
+      "sha256": "0cddf5c6233ef23a2b0760694f798e3d6ac7fb9098f98bf20b87ef6856509706"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/afd/context.hpp",
+      "bytes": 4934,
+      "sha256": "b249bab98dddd92e4b68e34780f3e861bb4b80792726bcba2e51f3f12769b5c6"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/afd/return.hpp",
+      "bytes": 2084,
+      "sha256": "89e9b40ef621fb513d43629fa3b2c83deaaafab1ac2cf9b936c4235ac8b65b1c"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/afd/scheduler.hpp",
+      "bytes": 1470,
+      "sha256": "483df8b6b91f45508febedb3161cb7c8f167972bc78afe9d4762f78759913cf4"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/afd/token.hpp",
+      "bytes": 1144,
+      "sha256": "75244c7f7e210c4e43b446b80cc776a9b4f27825d07f6917fcee8d92d27fcf6a"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/bucket/workspace.hpp",
+      "bytes": 293,
+      "sha256": "38a20fb796af5b5e393f3e4fae2a304ab6aab6603c26103992bc2f15b864bde8"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/common/signals.hpp",
+      "bytes": 769,
+      "sha256": "7af04f07f354f164d069399347556b9843ff5ef82c353905640dafe50d866f7e"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/engram/workspace.hpp",
+      "bytes": 1461,
+      "sha256": "01cb203b1cc007a4fd239d80ee7ced28c3536e721fd5f6685ff9c13f9b4cfce0"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/ep/token.hpp",
+      "bytes": 5215,
+      "sha256": "05ee89c188ff51707b590213987e6f05e83513db65ec270fbef4488d0908e922"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/ep/workspace.hpp",
+      "bytes": 2857,
+      "sha256": "97d701ce013fd2b9ad7dc98763b64e95b6383f794aedbf62961e3e2ba655296f"
+    },
+    {
+      "path": "deep_ep/include/deep_ep/layout/pp/workspace.hpp",
+      "bytes": 387,
+      "sha256": "1022d3399b6b05ebc7334fa228d5d9ba493c21371d7385ee07902cd96950cf73"
+    },
+    {
+      "path": "deep_ep/utils/__init__.py",
+      "bytes": 97,
+      "sha256": "17eca447417b892ba186f9eb3b79a8d242ea860b22e1c704ea1937d062915c11"
+    },
+    {
+      "path": "deep_ep/utils/envs.py",
+      "bytes": 3218,
+      "sha256": "6588a211fd081b1097162b3f2283bef54174a3e7303fe51cc2f2b04e60a280e0"
+    },
+    {
+      "path": "deep_ep/utils/event.py",
+      "bytes": 3206,
+      "sha256": "9c7bd7135764e42a622d7bf8cac2f2a323c9b8054fda12d7c363dbf1f6a478fd"
+    },
+    {
+      "path": "deep_ep/utils/gate.py",
+      "bytes": 8770,
+      "sha256": "80768543492d2895fa258037b14af4c5224411b3284023d64cba88505862727d"
+    },
+    {
+      "path": "deep_ep/utils/math.py",
+      "bytes": 2047,
+      "sha256": "b5ccbda8a29b36a12bd82e145d85cf6e53dad4a7b5c84a202c2f4ad5fb97ea47"
+    },
+    {
+      "path": "deep_ep/utils/refs.py",
+      "bytes": 12183,
+      "sha256": "c915da8f087472370b5a469cd44ae000e581f3b2a76b9f4a7d3250244c406e07"
+    },
+    {
+      "path": "deep_ep/utils/semantic.py",
+      "bytes": 139,
+      "sha256": "443ddb2092c17bfdd5d4f36c29e5aa7421f09038f66d3f2decc4f7da94b0dd38"
+    },
+    {
+      "path": "deep_ep/utils/testing.py",
+      "bytes": 16297,
+      "sha256": "8ade9aa62c7cdef8d3cf061145bbc641cbd966a508a6d2be4c2dd6c9e3bc0c75"
+    },
+    {
+      "path": "setup.py",
+      "bytes": 6096,
+      "sha256": "ad822a90534984c20f132119ff8743e1f76413a8b44b5204a286ec05dab922c0"
+    },
+    {
+      "path": "tests/afd/afd_compile_groupb.py",
+      "bytes": 4618,
+      "sha256": "e59a289018c2f838bcfbb3eb99a5b3236498ac3de458babdeda521c213743524"
+    },
+    {
+      "path": "tests/afd/afd_construct_diag.py",
+      "bytes": 5702,
+      "sha256": "18df293e0672fb3a95da6b91f4ef1b375db82495fc391e154298eb4f6864f04a"
+    },
+    {
+      "path": "tests/afd/afd_endpoint_diag.py",
+      "bytes": 5380,
+      "sha256": "a8dd69491d1c90eb23b314a53b434344d409e7c029ab968c3c65309a626ce9bc"
+    },
+    {
+      "path": "tests/afd/afd_queue_meta_probe.py",
+      "bytes": 5812,
+      "sha256": "f862a2017facfa9e336bf010f98bc6b0430bbaaf3b1000a182a73f7ca5ddf36f"
+    },
+    {
+      "path": "tests/afd/afd_rankgraph_probe.py",
+      "bytes": 2686,
+      "sha256": "f5f2b3169ee3e3b14799e5f102d2f62261fd69c26f7d99ae623a2e3d4874e5b5"
+    },
+    {
+      "path": "tests/afd/compile_combine_only.py",
+      "bytes": 5848,
+      "sha256": "54204c7bc2a3f046b3d1875569b2575fb093a8a01995f5764a0d74890afe648a"
+    },
+    {
+      "path": "tests/afd/compile_probe_only.py",
+      "bytes": 4860,
+      "sha256": "39eb35bf467f4862bad8ca007c6ab737905cd510a9cd9b83b7087248fb85fc05"
+    },
+    {
+      "path": "tests/afd/run_pipeline_a5.py",
+      "bytes": 14712,
+      "sha256": "7144ef825b0f9b5e0e72d36e069bba3d1a5e79b4b8bb8dee6bc075e9b4b2eb5b"
+    },
+    {
+      "path": "third-party/deep_jit/.gitignore",
+      "bytes": 73,
+      "sha256": "719e312126cb053cbdbfbc6f42a97762a746db45ce30340ab3936fc8cd8ec5b6"
+    },
+    {
+      "path": "third-party/deep_jit/CMakeLists.txt",
+      "bytes": 781,
+      "sha256": "9e9e0193ac5ce7b17805375388b005292ece650525adee6d7310a11d660ae7f1"
+    },
+    {
+      "path": "third-party/deep_jit/README.md",
+      "bytes": 24075,
+      "sha256": "1a021f467c0e66ee07ff50ad2f3c0ff1ba71af5aaf354695efa89cc2598c9bf4"
+    },
+    {
+      "path": "third-party/deep_jit/csrc/python_api.cpp",
+      "bytes": 254,
+      "sha256": "60954ce19539a0c345e836f8e01ca59faca83a739d3981521fc5bf95db755d25"
+    },
+    {
+      "path": "third-party/deep_jit/deep_jit/__init__.py",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/ascend/backend.hpp",
+      "bytes": 8559,
+      "sha256": "374c53e066e6fa5b6c89304e67d5917dd8975ec858fb2b4d88d84f96e0bcae11"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/ascend/device.hpp",
+      "bytes": 3088,
+      "sha256": "7d0345b6ea6e631c9ae0af6e4e5e5bad4aa7bee5cd4c116f0491ea72df001145"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/ascend/driver.hpp",
+      "bytes": 1274,
+      "sha256": "d0c707e96a78cc01e7f0376bdab9877cfc845649db2845ab2e8480d3b30e359f"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/ascend/kernel.hpp",
+      "bytes": 10221,
+      "sha256": "5f9702aafd696671874fa5805900552c26df8fbc5bea6e4167e8aadfbec32e86"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/ascend/options.hpp",
+      "bytes": 5821,
+      "sha256": "2fa590dae7c68ac89a011005d9258e1017b87ef505fedf775726cc7f3b63def3"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/cuda/backend.hpp",
+      "bytes": 8750,
+      "sha256": "4d595b86c4d4c861c59684844232014150632b4c3028682f86ba301cf519275b"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/cuda/device.hpp",
+      "bytes": 2549,
+      "sha256": "401ceb5217fa275de99a949406221cd44f007e32dc4a3ce0550e0c6ac8435b94"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/cuda/driver.hpp",
+      "bytes": 2488,
+      "sha256": "e1e47cf1939112ce6495935b9c1fff19d7e64229e2c1995bfa2d1923f450913e"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/cuda/kernel.hpp",
+      "bytes": 8503,
+      "sha256": "26bc9622969f1dc79201ec8876371cefb6dffb4648495365947dc7b192c229e4"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/backend/cuda/options.hpp",
+      "bytes": 9037,
+      "sha256": "98dd2d36be2238367c712ea005449ca8271bbb13757a5b9ca8c54f9327408d83"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/cache/disk.hpp",
+      "bytes": 5425,
+      "sha256": "7722b02af13449fee7a266bced76843f04eba1ac9bd9b8b1311e760c3d573d17"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/cache/memory.hpp",
+      "bytes": 592,
+      "sha256": "54060462e785ddaba391e38f70f1b3544e23c3c43b8a08a4b01bd49a525ba169"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/python_api.hpp",
+      "bytes": 572,
+      "sha256": "09c08482bf85677149335d857fedd610b3d0f790f4169ce3efdc12542e32c498"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/runtime/config.hpp",
+      "bytes": 2749,
+      "sha256": "f0a334e00f9def1c85a8f194a7e0a522c0d76c9604a93e00ddc711d1a7ee6b9b"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/runtime/runtime.hpp",
+      "bytes": 3894,
+      "sha256": "4d811ebb64b2b394a84d206e65df7fd5d74055cd327d8d8e4d2aeb2cd97e2706"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/command.hpp",
+      "bytes": 1335,
+      "sha256": "7fde3af103340960c8b22aaf73c35f7d971618bace929705db7e9dedd3fa80a0"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/env.hpp",
+      "bytes": 2896,
+      "sha256": "4d079c7f958e4f179d0ed8107a4d0e70eae6131c1079442b567eb3ed4fea7503"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/exception.hpp",
+      "bytes": 6604,
+      "sha256": "d30116ff5dd526e542d8649dc79a42fde2c4e5ad47ed6aa3e5d3dec29f759a4f"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/filesystem.hpp",
+      "bytes": 4653,
+      "sha256": "e55bc574d3ae1016f7ad83c850ec3f9a067e2bdc673dcdb57ac5388da2c4fe2d"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/gil.hpp",
+      "bytes": 563,
+      "sha256": "1429d4b4a789d3ab781a58b6693afc316f7f8809a579268a06f8daa358ab9ab2"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/hash.hpp",
+      "bytes": 1398,
+      "sha256": "fa8f29c875ccce3c4308ffb1cc8617e17e41bf2b09d9a3d8f73a142e538caf4d"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/json.hpp",
+      "bytes": 4585,
+      "sha256": "93ab8203302324388f02a91e77dea0d33a8483572f8fe13482a7298871dba328"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/lazy.hpp",
+      "bytes": 3594,
+      "sha256": "4d7a7be7559066697a18679756744f97efabab09db0065e680faf3b4798a01ac"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/no_ref_ptr.hpp",
+      "bytes": 187,
+      "sha256": "49e43c9708565e0b16dad38afe7531cb148ca7ad3b5e72656107e7a13a405c55"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/parser.hpp",
+      "bytes": 4162,
+      "sha256": "a8a17886da5fb93931872e262f5ccb0c7b0ac8fd173e772067d482d1cf8947ec"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/str.hpp",
+      "bytes": 661,
+      "sha256": "4d87fa25d6ccd3efa125279d42afbc857fc2a4083c0dbc0bd4f7b1b74f455436"
+    },
+    {
+      "path": "third-party/deep_jit/include/deep_jit/utils/uuid.hpp",
+      "bytes": 930,
+      "sha256": "5fff8c1a7f77be5ec12ebb38fc8e14877fe6793804379ca2121a3216111898be"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend.py",
+      "bytes": 16396,
+      "sha256": "e50c76cd34af710bc505d4b52bc8e7f59cd00aa9e5cb8e26de73ea84beadc773"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/include_changed_content/test_ascend/detail/tracked_offset.hpp",
+      "bytes": 55,
+      "sha256": "965f2944d30c015947abea74628d47d8602ccb871311bc5cd6f00c53b176951c"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/include_changed_content/test_ascend/tracked_vector_add.hpp",
+      "bytes": 423,
+      "sha256": "4a0320d49def7a0fe6e730ad049c9d9b702c748ac9dc491865d0a31c4bbfdfc3"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/include_cycle/test_ascend/circular_include_dependency.hpp",
+      "bytes": 64,
+      "sha256": "4fdac2b58cb4d18d808597bf11cd8c8fd4347b2cfbaaf943379db805d0899cac"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/include_cycle/test_ascend/circular_include_entry.hpp",
+      "bytes": 69,
+      "sha256": "e3cfd067d752480de5b140cbcbdcc03016adc58763457c62ada0de174999fac0"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/include_original/test_ascend/detail/tracked_offset.hpp",
+      "bytes": 55,
+      "sha256": "cba91903cb7f69e9374e144a78ed5ac690f4e30ac2bc38ec34aa3dbc3996f50c"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/include_original/test_ascend/tracked_vector_add.hpp",
+      "bytes": 423,
+      "sha256": "4a0320d49def7a0fe6e730ad049c9d9b702c748ac9dc491865d0a31c4bbfdfc3"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/include_same_content/test_ascend/detail/tracked_offset.hpp",
+      "bytes": 55,
+      "sha256": "cba91903cb7f69e9374e144a78ed5ac690f4e30ac2bc38ec34aa3dbc3996f50c"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/include_same_content/test_ascend/tracked_vector_add.hpp",
+      "bytes": 423,
+      "sha256": "4a0320d49def7a0fe6e730ad049c9d9b702c748ac9dc491865d0a31c4bbfdfc3"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/compiler_option_value.hpp",
+      "bytes": 241,
+      "sha256": "97b4a3e1cb936029395277da19f40158a7b53fe9e6784634b94bf24b52f9cbfc"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/dynamic_ubuf_checksum.hpp",
+      "bytes": 462,
+      "sha256": "60268af3ffe446e14cd32b8075844806cc84558c418992f36d4d2df91fbfd274"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/launch_overhead_noop.hpp",
+      "bytes": 118,
+      "sha256": "cb1c67226b3053483d7a89eb7ea695109630c36166961e58ccb54af4c66d4de5"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/macro_selected_argument.hpp",
+      "bytes": 320,
+      "sha256": "6e60fe9073e80d60d2b397b6b3388d07d6995f7fef863330cd939cfd880bb66e"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/mixed_argument_echo.hpp",
+      "bytes": 430,
+      "sha256": "72d0bb2852e47787247f488fa652379d80b60905308618f6352b97cfa2eb6cd8"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/mixed_kernel_metadata.hpp",
+      "bytes": 152,
+      "sha256": "74e7e8692ea3a13e2980e0153c0a71ad4c023e44a25044d4614f06487b71b76b"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/multiple_entry_kernels.hpp",
+      "bytes": 246,
+      "sha256": "bd658665050cb18d61d9e23cff78a700e9a521301987a906059891543a7114b9"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/no_entry_kernel.hpp",
+      "bytes": 54,
+      "sha256": "8883ec74204ca3496db719219a903a584da5b11dc30e78329051c3d8399049b3"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/scalar_increment.hpp",
+      "bytes": 222,
+      "sha256": "76cab1fc6cc4d71fe54dcf40fab3ab117ddd31b989e90ed0effe0c3b583fcc7f"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/simd_vector_add.hpp",
+      "bytes": 1483,
+      "sha256": "91e0144e4e52706a7416774c38c478d3d859ed11633a6c2497bcab6ad2820f5d"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/simt_sequence.hpp",
+      "bytes": 932,
+      "sha256": "5d7b980eda1b544d66b91704c24aa057be4a306e13e2b00ce4367334ef491474"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/static_ubuf_round_trip.hpp",
+      "bytes": 618,
+      "sha256": "3dc738e7f2352265643be91a814f45acd0bd5593d273f03d27a42b02d6aa5b93"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/kernels/untracked_dependency.hpp",
+      "bytes": 212,
+      "sha256": "44f8458f82a91e92fdfdf3f0fbe1023d37d61cae979b5c933cb23a5bee4366e7"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/main.cpp",
+      "bytes": 43592,
+      "sha256": "8707beb5febe216a754b34987a2c683b847ecd9f8c576791922e6aa728b429f6"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/scripts/cache_publication_worker.py",
+      "bytes": 387,
+      "sha256": "d7f1c7a625daf36f6be24d93fe4bb91010c06a138d5f16119681db30cdf942e9"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/scripts/delayed_bisheng.py",
+      "bytes": 989,
+      "sha256": "6960846abe22ca45748e0807b7a37250ec30cc7dc164f83b850718f3e752e35c"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/scripts/process_worker.py",
+      "bytes": 563,
+      "sha256": "82851ffcba5188f6ac5e47e4e5c17e0f1c036c6f024a07de3d0e7ac515322970"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/third_party_changed_content/third_party/dependency_value.hpp",
+      "bytes": 58,
+      "sha256": "1a002a811df557723d91ac452f9416b5d28529901b85abcbd5eecab005071445"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_ascend_proj/third_party_original/third_party/dependency_value.hpp",
+      "bytes": 58,
+      "sha256": "438ef1cc8f57f17e84c2c601efc12bdf7269cfbe7696139e2e1badfb51d5a8da"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda.py",
+      "bytes": 36334,
+      "sha256": "a584929a97ffb12430cc0ebb365c0824c2f9b0a4fcd2bb048cf43b037d3aa3bc"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_changed_content/test_cuda/detail/tracked_constant.cuh",
+      "bytes": 54,
+      "sha256": "1a3d7762ba1e589c53039c62507593e4ec042081b7d09ef8ec0a6d8d74e77649"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_changed_content/test_cuda/tracked_kernel.cuh",
+      "bytes": 258,
+      "sha256": "917c364a91a8e5edf44115284348539c831fe5e5160be5a3feab0004af5b0fbf"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_cycle/test_cuda/circular_include_dependency.cuh",
+      "bytes": 62,
+      "sha256": "8e3d8f00caa68426fca8adcc172137928dc9aec78653bd13bf1cd20b287b2c23"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_cycle/test_cuda/circular_include_entry.cuh",
+      "bytes": 67,
+      "sha256": "ae7049d8e6b59e248a0cf638c752f46a4887a8d9497e678135556a95ed416e19"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_original/test_cuda/detail/tracked_constant.cuh",
+      "bytes": 54,
+      "sha256": "38c3233d3140f001662e7c59267066777799a4374dd4fbd4fe82694d25e43831"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_original/test_cuda/tracked_kernel.cuh",
+      "bytes": 258,
+      "sha256": "917c364a91a8e5edf44115284348539c831fe5e5160be5a3feab0004af5b0fbf"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_original/test_cuda/tracked_to_untracked_dependency.cuh",
+      "bytes": 186,
+      "sha256": "7a959d4b383fb13fae4482608a8b026c7402ff1f8ceb9ed76d240b135bc279ae"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_same_content/test_cuda/detail/tracked_constant.cuh",
+      "bytes": 54,
+      "sha256": "38c3233d3140f001662e7c59267066777799a4374dd4fbd4fe82694d25e43831"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/include_same_content/test_cuda/tracked_kernel.cuh",
+      "bytes": 258,
+      "sha256": "917c364a91a8e5edf44115284348539c831fe5e5160be5a3feab0004af5b0fbf"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/cluster_shared_memory.cu",
+      "bytes": 806,
+      "sha256": "7282480eea2a78e1b988de3d47da81130f225ae4bb016365d3026715ea0be490"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/compiler_options.cu",
+      "bytes": 221,
+      "sha256": "5b94e2393e3a32cafc502b4102037b633a3cf0662cfec981651f7b8dc97b4489"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/cooperative_grid_sync.cu",
+      "bytes": 647,
+      "sha256": "3a369c4e3a0345049c014ee2b21f7304d44dbe1b57c207090b06895be138827b"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/explicit_local_memory.cu",
+      "bytes": 418,
+      "sha256": "de9a0fdb8f79f4b23a8538ce83d671c14de6fb0dd1a70e63c943efcc5ec140a1"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/forced_register_spill.cu",
+      "bytes": 1159,
+      "sha256": "35edb91332a25360e643af9e5eae4c3b9193c360381b397a0eb246c735774909"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/generated_float_literal.cu",
+      "bytes": 247,
+      "sha256": "026d92859aa5ccf1c6f519293f8a5b142a7a73624e36ece368e9e46563d1624e"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/large_dynamic_shared_memory.cu",
+      "bytes": 330,
+      "sha256": "a3551558ae321bdd3e556f926a5ebc6ed8547e30727ace4ebdaf365a2ca5670e"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/large_kernel_arguments.cu",
+      "bytes": 2668,
+      "sha256": "5cad1fdf8c303345492f50946221bfa0955f7e5a67d800c0b83cbc136eae2616"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/launch_overhead.cu",
+      "bytes": 55,
+      "sha256": "5af77539d852ac73682f5bd87a0bf7f6cfb83a38f49470831be6b05421a79ca0"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/macro_selected_abi.cu",
+      "bytes": 395,
+      "sha256": "1c8073c4fb5877859df289de46c3852fe68220cbd5b52f8f27a3921eef8479cf"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/mixed_arguments.cu",
+      "bytes": 1244,
+      "sha256": "2f0f997137320aec9942d817a3e64b6133b6b3387484ddb0d748b07292d0e2e3"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/multidimensional_launch.cu",
+      "bytes": 505,
+      "sha256": "23dc8c334c14e7e93521d168a95a9fbc5380dd6e1336cd3e79dec9ef099ad299"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/multiple_kernels.cu",
+      "bytes": 92,
+      "sha256": "ab3b63320769d4edd050f1627c9b1ca14d72fe35bd7826fee48272679fc1ec7e"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/no_kernel.cu",
+      "bytes": 55,
+      "sha256": "bd97c4f9baf0686db78526870e072ed2158118c41268a7cc8831cbb170bd3380"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/printf_only.cu",
+      "bytes": 158,
+      "sha256": "35d2f8f354b8d703658c1274d920cc384e55d06ece1629b56d5427caa682fa2a"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/runtime_launch_features.cu",
+      "bytes": 607,
+      "sha256": "82e7ff0b04e046dbc0ed8ad05470589220ccfed9c5add80dacaa7d30e632ff8e"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/template_argument_hash.cu",
+      "bytes": 271,
+      "sha256": "e1f65288206e7d81dcb928507e94b9702ebb1feb87315799e22137fd5f031bc2"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/tensor_map_argument.cu",
+      "bytes": 444,
+      "sha256": "792edf5dcfcba3d5cc6192120afd79491f059e84f833b22e2f16486cc672b47c"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/tracked_include.cu",
+      "bytes": 150,
+      "sha256": "e46d4641401922265124ca64da46aa3d2d709d5c890959efbdc0b54adca15cd2"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/tracked_to_untracked_dependency.cu",
+      "bytes": 57,
+      "sha256": "776ce4a4c289e484c884e02b8e81675ba4162d99a4c79f196e378da8a97b9152"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/kernels/untracked_dependency.cu",
+      "bytes": 161,
+      "sha256": "207f8ce50437704e319d8aa8dc95e6bedb01882d6f906bd83b1441d435873044"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/main.cpp",
+      "bytes": 177362,
+      "sha256": "319aec08ea47f52b9e299101eb4f92df75a9b1c86d90f1ab997a9fbfee2fb03b"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/scripts/compile_process.py",
+      "bytes": 741,
+      "sha256": "85e0cd67c15da332da158528dfee55efb636012f17f1cef16c6f097d97154040"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/scripts/disk_cache_process.py",
+      "bytes": 303,
+      "sha256": "270ddf66538fd8705c32324a680e915cf0d10d9afd03d0abd36244c87e4acd6c"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/scripts/failing_post_hook.py",
+      "bytes": 360,
+      "sha256": "70e4d3bdf86a5f971c86a4857817b868e8855d93265d99b70b81cce8fb0e1f51"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/scripts/loadable_post_hook.py",
+      "bytes": 301,
+      "sha256": "6d16628a0fdd922bccf5488de1c69d445d22e50f9ba0ac80e3c975e6748c47e7"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/scripts/nvcc_barrier.py",
+      "bytes": 1098,
+      "sha256": "044d8786372dbb7e90c0b325fbaca84d4a8df9638949a2761fe5cf35d5eaa7bd"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/scripts/post_hook.py",
+      "bytes": 256,
+      "sha256": "6eb8da1e45436b7f7961296f6ffe48d49018985c9041a746d959e5cbe6a24c4d"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/third_party_changed_content/third_party/dependency_value.cuh",
+      "bytes": 61,
+      "sha256": "2f0c588f12acf026c72957583ad3a70c780d81cf5dc46b0b46a7bfdd0d24cd73"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/third_party_original/third_party/dependency_value.cuh",
+      "bytes": 61,
+      "sha256": "cca5255b4daac392db1970230a2157ab7b41aa6ba0383abef56b2ae12b414e23"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_cuda_proj/third_party_same_content/third_party/dependency_value.cuh",
+      "bytes": 61,
+      "sha256": "cca5255b4daac392db1970230a2157ab7b41aa6ba0383abef56b2ae12b414e23"
+    },
+    {
+      "path": "third-party/deep_jit/tests/test_exception.py",
+      "bytes": 2406,
+      "sha256": "9a2b311956ef31bb3e3ac7248434bebef811ce9a5266fc1e98747046f209bcd0"
+    }
+  ]
+}
