@@ -28,8 +28,9 @@ def raw_bytes(tensor):
 
 def directory(owner):
     raw = raw_bytes(owner.context)
-    fields = struct.unpack_from('<16I8Q', raw)
-    lanes, peers, addresses = fields[16:19]
+    # ABI 2 adds channel_stride and reserved_pad0 before the uint64 offsets.
+    fields = struct.unpack_from('<18I8Q', raw)
+    lanes, peers, addresses = fields[18:21]
     return dict(raw=raw, ranks=fields[1], num_lanes=fields[3], experts=fields[4],
                 k=fields[5], hidden_bytes=fields[6], sf_packs=fields[7],
                 lanes=[struct.unpack_from('<8I', raw, lanes + 32*i) for i in range(fields[3])],

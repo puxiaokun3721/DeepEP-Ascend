@@ -1,0 +1,11 @@
+# 返回窗口按实际hidden分配（待设备回归）
+
+本分支基于已交付e6c04d0，移除AFD新增的15KiB最低返回间距，使用align512(2*hidden)。原生DeepEP按实际hidden与自身metadata计算布局；AFD保留自身512B对齐和逐top-k返回位置，不改变归约/ACK/credit协议，也不冒称原生布局完全一致。
+
+完整AFDBuffer和local_receiver两处同时修改。收发kernel已从AFDReturnDirectory读取stride；发送长度2H，接收读取范围不超过2H，ABI2/directory version1不变。必须新建owner、所有rank绑定新host扩展；不混用旧目录和新进程。旧已验证快照及镜像不覆盖。
+
+H128/K2/C32768/单slot的A返回payload由960MiB降至32MiB；这是源码字节预算，不是整体HBM实测。H7168时stride由15360降至14336，H8192仍16384。F输入payload布局未改变。
+
+tests/afd/run_capacity_a5.py新增实际host构造/目录检查：H128、256、384、7168、8192的stride与两物理slot偏移。recv_npu_support目录解析同步到ABI2的18个uint32前缀；旧16字段解析会错读lane地址。该脚本不启动kernel，不替代两/四卡全链路回归。
+
+状态：本地Python语法/CPU合同测试与源码审查，不是SDK/NPU通过。执行方需私有host重建、实际导入绑定、目录/分配检查、两卡与四卡nonunit/balanced全链回归，再继续32K窗口/角色内存测试。验证通过前不更新历史validated-source-manifest.json或交付镜像；该manifest只描述旧快照，当前候选不应声称通过旧清单校验。

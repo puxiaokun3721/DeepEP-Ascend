@@ -83,7 +83,7 @@ TaskInfo ABI为16个小端uint32：`abi_version=1, src_rank_idx, payload_slot_id
 
 纯bit搬运：BF16 hidden或FP8 E4M3FN hidden；SF int16 pack、topk int64、weights FP32。F每token每目标rank一个record，每有效专家route一个uint32 `record_idx*K+topk_slot`。metadata的src_token_idx为**轮内token下标**，用Ledger.token_begin恢复全B下标。F prefix为本rank各专家累计end，专家e区间为`[e==0?0:prefix[e-1],prefix[e])`。
 
-Record/metadata padding见 [TokenLayout](../../deep_ep/include/deep_ep/layout/afd/token.hpp)。metadata对齐padding清零；record_stride中未使用尾部不承诺清零。实际UB/workspace由family/C决定，无完整hidden发送镜像。A端目前仍按每本地lane `C*K*max(15360,align512(2H))`预留未来返回窗口，不能把该预留称作已实现combine功能。
+Record/metadata padding见 [TokenLayout](../../deep_ep/include/deep_ep/layout/afd/token.hpp)。metadata对齐padding清零；record_stride中未使用尾部不承诺清零。实际UB/workspace由family/C决定，无完整hidden发送镜像。A端按每本地lane `C*K*align512(2H)`预留返回窗口，去掉历史15KiB固定下限；空间按每轮容量C计算，多个物理槽累加。combineSend每条实际传输为`2H`字节，地址间距包含512B对齐。
 
 ## 约束与生命周期
 

@@ -178,7 +178,8 @@ public:
         uint64_t f_payload_bytes=0,a_payload_bytes=0;
         std::vector<uint64_t> source_payload_bytes(src_domain_ranks.size(),0);
         std::vector<AFDReturnLane> return_lanes;
-        const uint64_t return_stride=std::max(uint64_t(15360),align512(2*uint64_t(hidden)));
+        // BF16 result rows need their actual hidden bytes plus transport alignment.
+        const uint64_t return_stride=align512(2*uint64_t(hidden));
         std::vector<AFDAddress> addresses;
         for(uint32_t l=0;l<lanes.size();++l) {
             const uint64_t c=lanes[l].capacity;
@@ -188,7 +189,7 @@ public:
             a.prefix_offset=f_payload_bytes;f_payload_bytes=checked_allocation_bytes({f_payload_bytes,align32(4*uint64_t(num_experts/n))});
             a.inbox_offset=uint64_t(l)*128;a.input_ready_offset=a.inbox_offset+64;
             for(int f=0;f<n;++f) {a.consumed_offset=(uint64_t(l)*n+f)*64;addresses.push_back(a);}
-            // Keep the original small-return-window budget, although this operator only sends input.
+            // Reserve one aligned BF16 result per route in each local round window.
             auto& source_bytes=source_payload_bytes[lanes[l].src_rank_idx];
             return_lanes.push_back({source_bytes,uint64_t(l)*n*64+32,uint64_t(l)*128+96,0});
             source_bytes=checked_allocation_bytes({source_bytes,align512(c*num_topk*return_stride)});
@@ -373,7 +374,7 @@ public:
         c.context_bytes=c.layers_offset+align32(4*uint64_t(layer_ids.size()));
         c.reserved_address=c.context_bytes;
         AFDReturnDirectory directory{c.reserved_address+32,c.reserved_address+32+32*uint64_t(num_src),
-            std::max(uint64_t(15360),align512(2*uint64_t(hidden))),1,0};
+            align512(2*uint64_t(hidden)),1,0};
         c.context_bytes=directory.lanes_offset+32*uint64_t(lanes.size());
         const uint64_t bytes=checked_allocation_bytes({c.context_bytes,c.payload_bytes,c.control_bytes});
         EP_HOST_ASSERT(bytes<=memory_budget_bytes);owner->known_allocation_bytes=bytes;
