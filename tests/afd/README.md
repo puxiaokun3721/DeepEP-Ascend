@@ -1,5 +1,24 @@
 # AFD operator test artifacts
 
+## Current delivery (AUDIT025, 2026-10-27)
+
+Use `run_pipeline_a5.py` for the limited identity-expert functional and memory
+diagnostics recorded in the [current delivery manifest](../../docs/afd/deployment/current-delivery-manifest.json).
+The manifest binds the delivered bytes, reported runtime, exact reported script
+argv and run ID, and pending evidence. This entry is not a high-discriminability
+precision test, transaction-reuse verdict or steady-state performance benchmark.
+`run_send_recv_a5.py` is historical and not recommended: its Task ABI version and
+Context address-table read are corrected, but it still installs a synthetic F
+fixture. D1/D2 correctness and lifecycle work will be delivered separately after
+the known oracle corrections; no D1/D2 PASS is claimed by this update.
+
+The sections and commands below retain their original historical scope. Current
+authorization permits necessary configuration/dependency work in a dedicated
+container after checking that writes do not reach shared mounts; do not modify
+shared host packages or other jobs. Check every selected device before launch
+and during execution, and bound cleanup to this run on conflict or uncertainty.
+No reviewer ACK or two-card rerun is introduced by this delivery.
+
 ## Current multi-slot/multi-round A5 bring-up (2026-10-21, not executed here)
 
 `run_pipeline_a5.py` accepts `--microbatches 1|2|3` (default 1) and

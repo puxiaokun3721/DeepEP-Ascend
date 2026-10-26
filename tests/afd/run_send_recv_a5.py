@@ -101,7 +101,7 @@ def main():
             if args.transposed_sf:
                 sf = sf.T.contiguous().T
         task = torch.from_numpy(np.frombuffer(struct.pack('<16I',
-            1, 0, 0, 0, 0, args.batch, 1, *([0]*9)), dtype=np.uint8).copy()).npu()
+            2, 0, 0, 0, 0, args.batch, 1, *([0]*9)), dtype=np.uint8).copy()).npu()
         owner.dispatchSend(x, sf, topk, weights, mask, task, owner.context,
             owner.control_buffer, owner.round_ledger, owner.workspace, owner.send_status)
         torch.npu.synchronize()
@@ -112,7 +112,7 @@ def main():
         # Check source bits independently against generated A inputs. This also
         # catches send corruption that a snapshot-only receive oracle would miss.
         context = raw_bytes(owner.context)
-        addresses = struct.unpack_from('<Q', context, 80)[0]
+        addresses = struct.unpack_from('<Q', context, 88)[0]
         record_offset, refs_offset, counts_offset, prefix_offset, _, _, _, _ = struct.unpack_from('<8Q', context, addresses)
         payload = raw_bytes(owner.payload)
         counts = np.frombuffer(payload, dtype='<u4', count=experts, offset=counts_offset)

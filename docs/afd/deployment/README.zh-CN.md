@@ -1,3 +1,10 @@
+> AUDIT025 current delivery (2026-10-27): see
+> [current-delivery-manifest.json](current-delivery-manifest.json) and
+> [the recommended entry scope](../../../tests/afd/README.md).
+> The page below and the existing validated-source/IMAGE019 manifests are
+> historical snapshots. Their source hashes and image contents do not certify
+> the current runner/stride changes; they remain available for provenance.
+
 # A5 AFD 两卡 / 四卡验证版本部署
 
 本目录面向另一台 Linux ARM64 A5 机器复现。项目的通用 README 介绍上游 EP；

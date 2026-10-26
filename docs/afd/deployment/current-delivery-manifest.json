@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "updated_at": "2026-10-27",
+  "scope": "AUDIT025 runner delivery; limited identity functional and memory diagnostics, not final precision/lifecycle/performance acceptance",
+  "source": {
+    "base_commit": "ea00eb597a8ab9835c47136a6a92717c05569d50",
+    "branch": "codex/a5-afd-return-stride-20261026",
+    "delivery_commit": "the Git commit containing this manifest",
+    "kernel_or_host_changes_in_this_delivery": false
+  },
+  "recommended_entry": {
+    "path": "tests/afd/run_pipeline_a5.py",
+    "bytes": 24861,
+    "sha256": "a55ec08a14c2d6de72b7f3667dc11b4bd9f06815a04bb5bcc7aa6bcbbe7d0815",
+    "site_byte_identity_verified": true,
+    "features": [
+      "ABI2 context reserved_address at offset 128",
+      "weights/routes/profile-trace/run-tag options",
+      "role budgets and conservative preflight v3",
+      "host FUNCSEG timing"
+    ],
+    "limitations": [
+      "Identity experts and repeated input rows cannot distinguish all expert/weight/token permutations.",
+      "Balanced routing does not send both experts of every token across the two F ranks.",
+      "FUNCSEG includes CPU golden and polling, excludes the final barrier; trace includes the final barrier.",
+      "Compile-only preparation is not a completed-transaction warmup.",
+      "Owner and Torch memory counters have different, overlapping scopes; neither is total device HBM."
+    ]
+  },
+  "legacy_entry": {
+    "path": "tests/afd/run_send_recv_a5.py",
+    "bytes": 7241,
+    "sha256": "fd99019b6ecc6701b0c72efe376b17af904b9a5d6c4acef3efb28ece0934adf6",
+    "recommended": false,
+    "changes": [
+      "Task remains <16I (64 bytes); abi_version 1 -> 2",
+      "Context addresses_offset field read 80 -> 88"
+    ],
+    "site_sha256_reported": "c1215c9e0e9967d1e426109a00cd3eb1ef75637b4f25599b90e1f4cf9a215046",
+    "site_byte_identity_verified": false,
+    "identity_note": "The two documented ABI corrections match site semantics; this minimal local file is not byte-identical to the reported site file. No new two-card execution was performed.",
+    "scope": "Historical send -> synchronize -> synthetic receive fixture only; not scheduler, ACK or transaction-reuse evidence."
+  },
+  "site_runtime_reported": {
+    "host_path": "csrc/buffers/afd.hpp",
+    "host_sha256": "a1d54d91c5c7e9dbee6eb98313f623c52dc241083bc54c4de3646402e0f6bcf6",
+    "module_relative_path": "deep_ep/_C.cpython-311-aarch64-linux-gnu.so",
+    "module_bytes": 6179696,
+    "module_sha256": "016888d24a7825dc77340c746622af9ae236e6a20d89e18d13cdb4eb63b10725",
+    "exact_loaded_module_path": null,
+    "path_status": "Full PYTHONPATH/import root supplied in d62e0d64; actual loaded module absolute path from normal RUNCFG still pending, not inferred from the root.",
+    "binary_locally_rebuilt_or_rehashed": false,
+    "run_pkg_bytes": 15391,
+    "run_pkg_sha256": "cba4d906d743f53e559e039ab652e59dfa230a4c935bd7ad40168551ca6ab960",
+    "reported_pythonpath": "/work/bringup/A5-AFD-20261025-JETTY0-DIAG/src/br_repo_jetty0diag",
+    "reported_import_root": "/work/bringup/A5-AFD-20261025-JETTY0-DIAG/src/br_repo_jetty0diag/deep_ep"
+  },
+  "deepjit": {
+    "base_commit": "65f513952b8771408a19202f65e36398522db6db",
+    "verified_patched_tree": "c6ad4e84bba90ceb44c50c2678dab65758bf4564",
+    "patch_application": "scripts/afd/apply_deepjit_patches.py",
+    "historical_patch_manifest": "docs/afd/deployment/validated-source-manifest.json",
+    "status": "Previously verified pinned submodule plus three content patches and one executable-bit restoration. Existing dirty state preserved, not characterized as unknown drift; no DeepJIT changes in this delivery."
+  },
+  "environment": {
+    "version_reference": "docs/afd/deployment/environment-manifest.json",
+    "setup_reference": "docs/afd/deployment/environment.zh-CN.md",
+    "site_reports_environment_unchanged": true,
+    "historical_image_tag": "afd-a5-validated-20261026:runtime-clean-v1",
+    "historical_image_id_prefix": "92168578",
+    "historical_image_manifest": "docs/afd/deployment/image019-artifacts.json",
+    "latest_source_in_image_verified": false,
+    "portability": "Current runner/stride changes have not been verified inside the historical image. Another machine requires matching environment, private rebuild, import binding and device validation.",
+    "historical_manifest_scope": "Existing validated-source/environment/IMAGE019 manifests describe their original snapshots; they do not certify this delivery unchanged."
+  },
+  "run_evidence": {
+    "repository": "https://github.com/puxiaokun3721/afd-a5-validation",
+    "source_packet_commit": "9d6c5a13457ff89a6450fcd38f1150dbb58399b0",
+    "result_packet_commit": "a93f44a8cdda06eaf30a0991840b1b2a789dbbcd",
+    "run_id": "prod_func21_L03M_20261026T230332",
+    "runner_argv_reported": [
+      "tests/afd/run_pipeline_a5.py",
+      "--window",
+      "16",
+      "--q",
+      "7",
+      "--timeout-seconds",
+      "300",
+      "--batch",
+      "32768",
+      "--window",
+      "32768",
+      "--q",
+      "1024",
+      "--microbatches",
+      "1",
+      "--round-step",
+      "--weights",
+      "nonunit",
+      "--routes",
+      "balanced",
+      "--profile-trace",
+      "--run-tag",
+      "prod_func21_L03M_20261026T230332"
+    ],
+    "argv_note": "Reported script argv, including repeated flags; not a complete launcher/environment reconstruction.",
+    "result_reported": "rc0 / FUNCTION_PASS / RUN_PASS, 653.78 seconds whole-run wall time",
+    "acceptance_scope": "Limited identity functional observation; resource/raw-log review is separate. Not an accepted steady-state or native-relative performance sample. Active-period positive worker observations supersede the earlier all-empty process-table summary.",
+    "latest_oracle_packet_commit": "d62e0d64dd954cf22dc0e0e6285a9b58d834f6cd"
+  },
+  "next_increment": {
+    "D1_D2_included": false,
+    "status": "Oracle v4 (87f6e5c) received and executor reports restoring strict runner comparison; local CPU review and strict device precision/lifecycle results remain pending. Earlier tolerance-only PASS does not close precision. D1/D2 sources are not included in this delivery."
+  },
+  "local_validation": {
+    "python_ast": "Both delivered scripts parse; no runtime imports or NPU execution.",
+    "pipeline_full_sha256": "Matches the eight-version independently reassembled site artifact.",
+    "send_recv_diff": "Exactly two ABI field corrections; Task width unchanged.",
+    "hardware_acceptance_added": false
+  }
+}
