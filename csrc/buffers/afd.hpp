@@ -166,7 +166,7 @@ public:
         uint32_t tile=0;
         for(uint32_t t:{32u,64u,128u,256u}) {
             const uint64_t ub=2*align32(4*uint64_t(num_experts))+2*align32(4*uint64_t(n))+
-                2*align32(4*uint64_t(t)*num_topk)+align32(48*uint64_t(n))+96+512+256+2*align32(4*m);
+                2*align32(4*uint64_t(t)*num_topk)+align32(48*uint64_t(n))+96*uint64_t(num_vec_cores)*uint64_t(n)+512+256+2*align32(4*m);
             if(ub<=available_ub)tile=t;
         }
         EP_HOST_ASSERT(tile!=0);
@@ -215,26 +215,39 @@ public:
         config.workspace=make_workspace(cmax,tile,num_topk,num_experts,n,m,max_slots);
         const uint64_t ledger_bytes=128*uint64_t(max_slots);
         const uint64_t app_bytes=checked_allocation_bytes({payload_bytes,control_bytes,config.context_bytes,config.workspace.num_bytes,ledger_bytes,32});
-        const uint64_t tables=2*std::max(num_vec_cores,domain_size-1)*sizeof(ChannelHandle);
+        // Grouped AFD layout keeps one channel per (peer, AIV); world2 stays legacy.
+        const uint64_t channel_capacity=domain_size>2?uint64_t(domain_size-1)*uint64_t(num_vec_cores):
+            uint64_t(std::max(num_vec_cores,domain_size-1));
+        const uint64_t tables=2*channel_capacity*sizeof(ChannelHandle);
         EP_HOST_ASSERT(app_bytes<=budget_bytes && tables<=budget_bytes-app_bytes);
         known_allocation_bytes=app_bytes+tables;
         EP_HOST_ASSERT(transport_reserve_bytes<=budget_bytes-known_allocation_bytes);
         // Registration is exclusively initialization-time; all ranks use identical context order.
         payload_context=std::make_shared<HCCLContext>(group_name,rank_idx,domain_size,payload_bytes,
-            num_vec_cores,num_cpu_timeout_secs,false,nullptr,true);
+            num_vec_cores,num_cpu_timeout_secs,false,nullptr,true,true);
         control_context=std::make_shared<HCCLContext>(group_name,rank_idx,domain_size,control_bytes,
-            num_vec_cores,num_cpu_timeout_secs,false,nullptr,true);
+            num_vec_cores,num_cpu_timeout_secs,false,nullptr,true,true);
+        // ### PATCH START: branch B channel stride (AFD private)
+        EP_HOST_ASSERT(payload_context->channel_stride==control_context->channel_stride);
+        config.channel_stride=payload_context->channel_stride;
+        const uint32_t channel_base_stride=payload_context->channel_stride;
+        auto peer_table_base=[&](int r)->uint32_t {
+            if(r==rank_idx) return UINT32_MAX;
+            const uint32_t base=uint32_t(r<rank_idx?r:r-1);
+            return channel_base_stride?base*channel_base_stride:base;
+        };
+        // ### PATCH END: branch B channel stride (AFD private)
         std::vector<AFDPeer> peers(n);
         for(int f=0;f<n;++f) {
             const int r=ffn_domain_ranks[f];
-            peers[f]={uint32_t(r),(r==rank_idx?UINT32_MAX:uint32_t(r<rank_idx?r:r-1)),payload_context->peer_buffer_bytes[r],
+            peers[f]={uint32_t(r),peer_table_base(r),payload_context->peer_buffer_bytes[r],
                 uint64_t(control_context->peer_ptrs[r]),control_context->peer_buffer_bytes[r]};
             EP_HOST_ASSERT(peers[f].payload_bytes>=f_payload_bytes && peers[f].control_bytes>=lanes.size()*128);
         }
         std::vector<AFDPeer> source_peers(src_domain_ranks.size());
         for(uint32_t s=0;s<source_peers.size();++s) {
             const int r=src_domain_ranks[s];
-            source_peers[s]={uint32_t(r),(r==rank_idx?UINT32_MAX:uint32_t(r<rank_idx?r:r-1)),
+            source_peers[s]={uint32_t(r),peer_table_base(r),
                 payload_context->peer_buffer_bytes[r],uint64_t(control_context->peer_ptrs[r]),control_context->peer_buffer_bytes[r]};
             EP_HOST_ASSERT(source_peers[s].payload_bytes>=source_payload_bytes[s]);
             EP_HOST_ASSERT(source_peers[s].control_bytes>=uint64_t(lanes.size())*n*64);
@@ -278,18 +291,38 @@ public:
     // Synchronize before dropping owner references; outstanding exported tensors retain allocations.
     void destroy() {
         EP_HOST_ASSERT(!closed);
-        ACL_CHECK(aclrtSynchronizeDevice());
+        // Teardown stage markers (diagnostic): role/stage/monotonic time/rc only.
+        const auto afd_destroy_t0 = std::chrono::steady_clock::now().time_since_epoch();
+        auto afd_stage = [&](const char* name, int rc) {
+            const auto t_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch() - afd_destroy_t0).count();
+            std::fprintf(stderr, "AFD_DESTROY role=%c stage=%s t_us=%lld rc=%d\n",
+                         config.src_rank_idx != UINT32_MAX ? 'A' : 'F', name,
+                         static_cast<long long>(t_us), rc);
+            std::fflush(stderr);
+        };
+        afd_stage("device_sync_begin", 0);
+        const auto afd_sync_rc = aclrtSynchronizeDevice();
+        afd_stage("device_sync_end", static_cast<int>(afd_sync_rc));
+        ACL_CHECK(afd_sync_rc);
         closed=true;
         owned_payload=torch::Tensor();owned_control=torch::Tensor();owned_context=torch::Tensor();
         owned_ledger=torch::Tensor();owned_workspace=torch::Tensor();owned_status=torch::Tensor();
         owned_active=torch::Tensor();owned_execution=torch::Tensor();owned_recv_workspace=torch::Tensor();
         owned_recv_x=torch::Tensor();owned_recv_metadata=torch::Tensor();owned_recv_sf.reset();
+        afd_stage("combine_registration_reset_begin", 0);
         combine_registration.reset();
+        afd_stage("combine_registration_reset_end", 0);
         owned_scheduler_workspace=torch::Tensor();owned_completion=torch::Tensor();
         owned_psum=torch::Tensor();owned_counts=torch::Tensor();owned_combine_x=torch::Tensor();
         owned_combine_send_workspace=torch::Tensor();owned_combine_recv_workspace=torch::Tensor();owned_recv_status=torch::Tensor();
         owned_combine_recv_progress=torch::Tensor();
-        payload_context.reset();control_context.reset();
+        afd_stage("payload_context_reset_begin", 0);
+        payload_context.reset();
+        afd_stage("payload_context_reset_end", 0);
+        afd_stage("control_context_reset_begin", 0);
+        control_context.reset();
+        afd_stage("control_context_reset_end", 0);
     }
     // ### PATCH START: receiver initialization and out-style public operation
     // Local fixture owner: same packed Context and kernel, no fake HCCL or scheduler.
@@ -405,7 +438,8 @@ public:
         EP_HOST_ASSERT(!closed && recv_prepared && recv_rank>=0 && !ffn_prepared);
         const uint32_t l=config.num_source_lanes,r=config.num_experts/config.num_ranks;
         // Exact array-aligned arenas of the device families, including source-lane maps.
-        const uint64_t send_ub=align32(48*uint64_t(config.num_src_ranks))+96+512+
+        const uint64_t send_ub=align32(48*uint64_t(config.num_src_ranks))+
+            96*uint64_t(config.num_vec_cores)*uint64_t(config.num_src_ranks)+512+
             32*uint64_t(combine_tile)+2*align32(4*uint64_t(l))+256;
         EP_HOST_ASSERT(send_ub<=uint64_t(num_ub_bytes) && 256+5*align32(4*uint64_t(r))<=uint64_t(num_ub_bytes));
         const uint64_t scratch=recv_workspace_bytes(config.num_vec_cores);
@@ -460,7 +494,8 @@ public:
         EP_HOST_ASSERT(known_allocation_bytes<=budget_bytes && extra<=budget_bytes-known_allocation_bytes);
         EP_HOST_ASSERT(transport_reserve_bytes<=budget_bytes-known_allocation_bytes-extra);
         owned_combine_recv_workspace=byte_tensor(scratch);zero_tensor(owned_combine_recv_workspace);
-        owned_recv_status=torch::zeros({8},torch::TensorOptions().device(TORCH_DEVICE_NPU).dtype(torch::kUInt32));
+                // Wiring fix: aclnnInplaceZero rejects DT_UINT32; zero via int32 then view keeps identical bits/ABI.
+        owned_recv_status=torch::zeros({8},torch::TensorOptions().device(TORCH_DEVICE_NPU).dtype(torch::kInt32)).view(torch::kUInt32);
         if(round_step) {
             owned_combine_recv_progress=byte_tensor(progress_bytes);zero_tensor(owned_combine_recv_progress);
         }
@@ -499,6 +534,48 @@ public:
         EP_HOST_ASSERT(!closed && ffn_prepared);
         afd::launch_compute_ready(owned_active.data_ptr(),owned_execution.data_ptr(),num_ub_bytes);
     }
+    // ### PATCH START: queue-metadata read-only probe (review candidate)
+    void probeQueueMeta(at::Tensor& out) {
+        EP_HOST_ASSERT(!closed and payload_context and control_context);
+        EP_HOST_ASSERT(out.scalar_type() == at::kInt and out.numel() >= 32);
+        afd::launch_queue_meta_probe(payload_context->jetty_device_ptrs,
+                                     control_context->jetty_device_ptrs,
+                                     out.data_ptr(), num_ub_bytes);
+    }
+    std::string compileQueueMetaProbeOnly() {
+        return afd::compile_queue_meta_probe_only();
+    }
+    // ### PATCH START: combine compile-only entries (review candidate)
+    std::string compileCombineSendOnly() {
+        EP_HOST_ASSERT(!closed and payload_context);
+        return afd::compile_combine_send_only(config,recv_rank,hidden,recv_q_alloc,
+                                              combine_tile,num_ub_bytes,timeout_cycles);
+    }
+    std::string compileCombineRecvOnly() {
+        EP_HOST_ASSERT(!closed);
+        return afd::compile_combine_recv_only(config,hidden,combine_chunk,
+                                              num_ub_bytes,timeout_cycles,combine_recv_round_step);
+    }
+    // ### PATCH START: pipeline prewarm compile-only entries
+    std::string compileFFNSchedulerOnly() {
+        EP_HOST_ASSERT(!closed && ffn_prepared);
+        return afd::compile_ffn_scheduler_only(config,recv_q,recv_q_alloc,recv_alignment,scheduler_precheck);
+    }
+    std::string compileComputeReadyOnly() {
+        EP_HOST_ASSERT(!closed && ffn_prepared);
+        return afd::compile_compute_ready_only();
+    }
+    std::string compileDispatchSendOnly() {
+        EP_HOST_ASSERT(!closed && config.src_rank_idx!=UINT32_MAX);
+        return afd::compile_dispatch_send_only(config,num_ub_bytes,timeout_cycles);
+    }
+    std::string compileDispatchRecvOnly() {
+        EP_HOST_ASSERT(!closed && recv_prepared);
+        return afd::compile_dispatch_recv_only(config,recv_q,recv_q_alloc,recv_alignment,recv_tile,num_ub_bytes);
+    }
+    // ### PATCH END: pipeline prewarm compile-only entries
+    // ### PATCH END: combine compile-only entries
+    // ### PATCH END: queue-metadata read-only probe
     void combineSend(const at::Tensor& x,const at::Tensor& src_metadata,const at::Tensor& context,
         const at::Tensor& active,at::Tensor& control_buffer,at::Tensor& execution_state,
         at::Tensor& workspace,at::Tensor& completion) {

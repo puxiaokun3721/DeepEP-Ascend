@@ -6,9 +6,9 @@
 // Upstream: impls/ep/combine.hpp (3b25377d), single-slot x-direct branch.
 // ### PATCH START: AFD reverse transport without collective/rank partial reduction
 namespace deep_ep::afd {
-template<int NA,int L,int T> struct alignas(32) CombineSendUB {
+template<int NA,int L,int T,int NC> struct alignas(32) CombineSendUB {
     alignas(32) handle::HcommPeerInfo peer_infos[NA];
-    alignas(32) uint8_t jetty_info[96],ub_sqe[512];
+    alignas(32) uint8_t jetty_info[NC][NA][96],ub_sqe[512];
     alignas(32) int metadata[2][T][4];
     alignas(32) int lane_to_entry[L],lane_to_member[L];
     alignas(32) uint8_t control[256];
@@ -23,7 +23,7 @@ __global__ __vector__ void combine_send_impl(
     __gm__ void* control_buffer,__gm__ AFDExecutionState* execution_state,
     __gm__ void* workspace,__gm__ void* jetty_ptrs,__gm__ AFDCompletion* completion,const int rank_idx) {
     AscendC::InitSocState();
-    using UB=CombineSendUB<NA,L,T>;
+    using UB=CombineSendUB<NA,L,T,NC>;
     static_assert(sizeof(UB)<=U && T>0 && T<=128 && R<=512);
     const int vec_core_idx=AscendC::GetBlockIdx();
     auto ub=reinterpret_cast<__ubuf__ UB*>(0);
@@ -112,9 +112,9 @@ __global__ __vector__ void combine_send_impl(
             if(l>=L || member.input_bit>1 || member.return_bit>1 || member.num_experts!=R ||
                member.delta_begin!=m*uint64_t(R) || ub->lane_to_entry[l]!=-1) {error=BAD_TASK;break;}
             ub->lane_to_entry[l]=i;ub->lane_to_member[l]=m;
-            const auto lane=lanes[l];const auto ret=return_lanes[l];
+            const auto lane=recv_read(lanes+l);const auto ret=recv_read(return_lanes+l);
             if(lane.src_rank_idx>=NA || lane.capacity==0 || lane.capacity>kMaxLaneTokens || lane.phase!=task.phase) {error=BAD_ABI;break;}
-            const auto peer=source_peers[lane.src_rank_idx];
+            const auto peer=recv_read(source_peers+lane.src_rank_idx);
             if(!recv_range(ret.return_offset,uint64_t(lane.capacity)*K*directory.return_stride,peer.payload_bytes) ||
                !recv_range(ret.credit_offset,32,context->control_bytes) ||
                !recv_range(ret.done_offset+uint64_t(rank_idx)*64,32,peer.control_bytes) ||
@@ -184,31 +184,47 @@ __global__ __vector__ void combine_send_impl(
         words[0]=error;recv_store(result,tmp,32);
     }
     recv_join();if(abort_if_error())return;
-    handle::HcommJetty jetty(reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(ub->jetty_info),ub->ub_sqe,jetty_ptrs,vec_core_idx);
+    // [group B] Local SQ and source-peer metadata come from the same (peer, AIV) channel entry.
+    const bool channel_grouped=context->channel_stride!=0;
     constexpr uint32_t kNumPollCQThreshold=10;
-    EP_DEVICE_ASSERT(jetty.jetty_info->cq_depth>kNumMaxPendingWrites+kNumPollCQThreshold &&
-        (jetty.jetty_info->cq_depth & (jetty.jetty_info->cq_depth-1))==0 &&
-        jetty.jetty_info->num_wqebb_bytes==handle::kNumWQEBBBytes);
-    handle::HcommPeer peer(ub->peer_infos,jetty_ptrs,source_peers[0].peer_idx);
-    for(int a=1;a<NA;++a) {handle::HcommPeer preload_peer(ub->peer_infos+a,jetty_ptrs,source_peers[a].peer_idx);}
-    uint32_t inflight=0,num_task_tokens=0;
-    if(begin<end) {
-        issue_load(begin,0);
-        for(uint32_t row=begin,t=0;row<end;row+=T,++t) {
-            const int stage_idx=t%2;
-            asc_sync_wait(PIPE_MTE2,PIPE_S,static_cast<event_t>(EVENT_ID2+stage_idx));
-            if(row+T<end)issue_load(row+T,1-stage_idx);
-            for(uint32_t j=0;j<T && row+j<end;++j) {
-                const auto md=ub->metadata[stage_idx][j];if(md[0]<0)continue;
-                const auto lane=lanes[md[0]];peer.peer_info=ub->peer_infos+lane.src_rank_idx;
-                const uint64_t offset=return_lanes[md[0]].return_offset+(uint64_t(md[1])*K+md[2])*directory.return_stride;
-                append_write_task<1,Timeout>(jetty,peer,offset,x+uint64_t(row+j)*H,nullptr,
-                    2*H,0,num_task_tokens,inflight);
+    {
+        handle::HcommJetty j0(reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(ub->jetty_info[vec_core_idx][0]),ub->ub_sqe,jetty_ptrs,
+            channel_grouped?int(source_peers[0].peer_idx)+vec_core_idx:vec_core_idx);
+        EP_DEVICE_ASSERT(j0.jetty_info->cq_depth>kNumMaxPendingWrites+kNumPollCQThreshold &&
+            (j0.jetty_info->cq_depth & (j0.jetty_info->cq_depth-1))==0 &&
+            j0.jetty_info->num_wqebb_bytes==handle::kNumWQEBBBytes);
+    }
+    handle::HcommPeer peer(ub->peer_infos,jetty_ptrs,source_peers[0].peer_idx+(channel_grouped?vec_core_idx:0));
+    for(int a=1;a<NA;++a) {handle::HcommPeer preload_peer(ub->peer_infos+a,jetty_ptrs,source_peers[a].peer_idx+(channel_grouped?vec_core_idx:0));}
+    // [group B] Write per source peer on its own queue; drain every queue before ACKs.
+    for(int a=0;a<NA;++a) {
+        handle::HcommJetty jetty_a(reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(ub->jetty_info[vec_core_idx][a]),ub->ub_sqe,jetty_ptrs,
+            channel_grouped?int(source_peers[a].peer_idx)+vec_core_idx:vec_core_idx);
+        EP_DEVICE_ASSERT(jetty_a.jetty_info->cq_depth>kNumMaxPendingWrites+kNumPollCQThreshold &&
+            (jetty_a.jetty_info->cq_depth & (jetty_a.jetty_info->cq_depth-1))==0 &&
+            jetty_a.jetty_info->num_wqebb_bytes==handle::kNumWQEBBBytes);
+        uint32_t inflight=0,num_task_tokens=0;
+        if(begin<end) {
+            issue_load(begin,0);
+            for(uint32_t row=begin,t=0;row<end;row+=T,++t) {
+                const int stage_idx=t%2;
+                asc_sync_wait(PIPE_MTE2,PIPE_S,static_cast<event_t>(EVENT_ID2+stage_idx));
+                if(row+T<end)issue_load(row+T,1-stage_idx);
+                for(uint32_t j=0;j<T && row+j<end;++j) {
+                    const auto md=ub->metadata[stage_idx][j];if(md[0]<0)continue;
+                    const auto lane=recv_read(lanes+md[0]);
+                    if(int(lane.src_rank_idx)!=a)continue;
+                    peer.peer_info=ub->peer_infos+lane.src_rank_idx;
+                    const uint64_t offset=return_lanes[md[0]].return_offset+(uint64_t(md[1])*K+md[2])*directory.return_stride;
+                    append_write_task<1,Timeout>(jetty_a,peer,offset,x+uint64_t(row+j)*H,nullptr,
+                        2*H,0,num_task_tokens,inflight);
+                }
             }
         }
+        issue_write_task<1,Timeout>(jetty_a,num_task_tokens,inflight);
+        flush_writes<Timeout>(jetty_a,inflight);
     }
-    issue_write_task<1,Timeout>(jetty,num_task_tokens,inflight);
-    flush_writes<Timeout>(jetty,inflight);recv_join();
+    recv_join();
     // Full independent snapshot precedes all ACKs. Nothing below reads Inbox.
     if(vec_core_idx==0) {
         auto cb=reinterpret_cast<__gm__ uint8_t*>(completion);

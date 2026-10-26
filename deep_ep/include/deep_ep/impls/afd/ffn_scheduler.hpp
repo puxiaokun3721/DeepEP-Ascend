@@ -5,8 +5,73 @@
 // ### PATCH START: AFD independent DP scheduler; native EP has no independent AF scheduler
 namespace deep_ep::afd {
 // Reuse the pinned-port DMA/cache helpers, not a second memory-ordering implementation.
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDInbox& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.microbatch_idx;out[1]=v.layer_idx;out[2]=v.round_idx;
+    out[3]=v.num_comm_rounds;out[4]=v.num_round_tokens;out[5]=v.return_bit;
+    out[6]=v.num_recv_records;
+    #pragma unroll
+    for(int i=0;i<9;++i) out[7+i]=v.reserved[i];
+}
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDActiveMember& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.source_lane_idx;out[1]=v.input_bit;out[2]=v.return_bit;
+    out[3]=v.delta_begin;out[4]=v.num_experts;
+    #pragma unroll
+    for(int i=0;i<3;++i) out[5+i]=v.reserved[i];
+}
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDActiveSegment& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.entry_idx;out[1]=v.source_lane_idx;out[2]=v.local_expert_idx;
+    out[3]=v.route_begin;out[4]=v.num_routes;out[5]=v.dst_row_begin;
+    #pragma unroll
+    for(int i=0;i<2;++i) out[6+i]=v.reserved[i];
+}
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDActiveEntry& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.pending_idx;out[1]=v.member_begin;out[2]=v.num_members;
+    out[3]=v.segment_begin;out[4]=v.num_segments;out[5]=v.num_rows;
+    out[6]=v.is_final;out[7]=v.grant_state;
+}
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDPendingLane& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.valid;out[1]=v.expected_input_bit;out[2]=v.grant_state;
+    out[3]=v.member_leader;
+    out[4]=uint32_t(v.first_seen);out[5]=uint32_t(v.first_seen>>32);
+    out[6]=v.num_group_members;out[7]=v.num_remaining_routes;
+    scheduler_store_ubuf(dst+32,v.inbox);
+}
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDSchedulerState& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=uint32_t(v.tick);out[1]=uint32_t(v.tick>>32);
+    out[2]=v.last_phase;out[3]=v.has_phase;
+    #pragma unroll
+    for(int i=0;i<4;++i) out[4+i]=v.reserved[i];
+}
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDExecutionState& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.stage;out[1]=v.error_code;out[2]=v.num_entries;
+    #pragma unroll
+    for(int i=0;i<5;++i) out[3+i]=v.reserved[i];
+}
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDActive& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.valid;out[1]=v.kind;out[2]=v.phase;out[3]=v.layer_idx;
+    out[4]=v.num_entries;out[5]=v.num_members;out[6]=v.num_segments;out[7]=v.num_expanded_tokens;
+    out[8]=v.num_padded_tokens;out[9]=v.reserved;
+    out[10]=uint32_t(v.entries_offset);out[11]=uint32_t(v.entries_offset>>32);
+    out[12]=uint32_t(v.members_offset);out[13]=uint32_t(v.members_offset>>32);
+    out[14]=uint32_t(v.segments_offset);out[15]=uint32_t(v.segments_offset>>32);
+}
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDCompletion& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.state;out[1]=v.error_code;out[2]=v.num_entries;out[3]=v.num_members;
+    out[4]=v.num_deltas;
+    #pragma unroll
+    for(int i=0;i<3;++i) out[5+i]=v.reserved[i];
+}
 template<class T> __aicore__ inline void scheduler_write(__gm__ T* dst,const T& value,__ubuf__ uint8_t* tmp) {
-    *reinterpret_cast<__ubuf__ T*>(tmp)=value;
+    scheduler_store_ubuf(tmp,value);
     recv_store(dst,tmp,sizeof(T));
 }
 __aicore__ inline bool scheduler_same(const AFDLane& a,const AFDPendingLane& p,
@@ -88,6 +153,7 @@ __aicore__ inline bool scheduler_ready(int leader,__gm__ const AFDLane* lanes,
     return true;
 }
 
+#ifndef AFD_KERNEL_COMPUTE_READY_TU
 template<int N,int E,int K,int L,int NL,int Q,int QA,int A,bool PRECHECK>
 __global__ __vector__ void ffn_scheduler_impl(
     __gm__ void* buffer,__gm__ const AFDContextLayout* context,__gm__ void* control_buffer,
@@ -212,7 +278,7 @@ __global__ __vector__ void ffn_scheduler_impl(
         if(*reinterpret_cast<__ubuf__ uint32_t*>(tmp)!=p.expected_input_bit) continue;
         auto lane=recv_read(lanes+i);
         recv_load(tmp,control+address.inbox_offset,64);
-        p.inbox=*reinterpret_cast<__ubuf__ AFDInbox*>(tmp);
+        p.inbox=recv_read_inbox_ubuf(tmp);
         if(!p.inbox.num_comm_rounds || p.inbox.round_idx>=p.inbox.num_comm_rounds || p.inbox.return_bit>1 ||
            p.inbox.num_round_tokens>lane.capacity || p.inbox.num_recv_records>p.inbox.num_round_tokens) {error=BAD_TASK;break;}
         bool layer_ok=false;
@@ -299,7 +365,9 @@ __global__ __vector__ void ffn_scheduler_impl(
     // Every dependent table/prefix store completed before publishing valid.
     scheduler_write(active,out,tmp);
 }
+#endif
 
+#ifndef AFD_KERNEL_FFN_SCHEDULER_TU
 // Same-stream bridge after actual GMM2; it does not execute or stand in for GMM.
 __global__ __vector__ void mark_compute_ready_impl(__gm__ const AFDActive* active,__gm__ AFDExecutionState* execution_state) {
     AscendC::InitSocState();if(AscendC::GetBlockIdx()!=0) return;
@@ -309,5 +377,6 @@ __global__ __vector__ void mark_compute_ready_impl(__gm__ const AFDActive* activ
     else if(task.kind==WORK) state.stage=COMPUTE_READY;
     scheduler_write(execution_state,state,reinterpret_cast<__ubuf__ uint8_t*>(0));
 }
+#endif
 }
 // ### PATCH END: AFD independent DP scheduler

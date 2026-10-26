@@ -71,6 +71,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_property_readonly("combine_recv_progress",&AFDBuffer::combine_recv_progress)
         .def("ffnScheduler",&AFDBuffer::ffnScheduler)
         .def("computeReady",&AFDBuffer::computeReady)
+        .def("probeQueueMeta",&AFDBuffer::probeQueueMeta)
+        .def("compileQueueMetaProbeOnly",&AFDBuffer::compileQueueMetaProbeOnly)
+        .def("compileCombineSendOnly",&AFDBuffer::compileCombineSendOnly)
+        .def("compileCombineRecvOnly",&AFDBuffer::compileCombineRecvOnly)
+        .def("compileFFNSchedulerOnly",&AFDBuffer::compileFFNSchedulerOnly)
+        .def("compileComputeReadyOnly",&AFDBuffer::compileComputeReadyOnly)
+        .def("compileDispatchSendOnly",&AFDBuffer::compileDispatchSendOnly)
+        .def("compileDispatchRecvOnly",&AFDBuffer::compileDispatchRecvOnly)
         .def("combineSend",&AFDBuffer::combineSend)
         .def("combineRecv",&AFDBuffer::combineRecv,py::arg("combined_topk_idx"),py::arg("topk_weights"),
              py::arg("token_mask"),py::arg("task_info"),py::arg("context"),py::arg("buffer"),
@@ -109,6 +117,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("all_reduce", &BucketBuffer::all_reduce)
         .def("all_gather", &BucketBuffer::all_gather);
 
+    m.def("probe_rank_graph_scalars", &deep_ep::rank_graph_probe_scalars);
     m.def("calculate_ep_buffer_size", &EPBuffer::calculate_buffer_size);
     m.def("get_num_allocation_alignment", []() {
         return kNumAllocationAlignmentBytes;

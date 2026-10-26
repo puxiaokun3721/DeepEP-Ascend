@@ -7,7 +7,7 @@
 namespace deep_ep::afd {
 constexpr __aicore__ __forceinline__ uint64_t align32(uint64_t n) { return (n + 31) / 32 * 32; }
 constexpr __aicore__ __forceinline__ uint64_t align512(uint64_t n) { return (n + 511) / 512 * 512; }
-constexpr uint32_t kAbiVersion = 1;
+constexpr uint32_t kAbiVersion = 2;
 // Current implementation-family bound per lane/physical slot, never a DP aggregate bound.
 constexpr uint32_t kMaxLaneTokens = 32768;
 enum ReturnProgressMode : uint32_t { RETURN_TRANSACTION=0, RETURN_ROUND_STEP=1 };
@@ -58,6 +58,9 @@ struct alignas(32) AFDContextLayout {
     uint32_t num_vec_cores, num_token_capacity, num_max_tokens_per_rank, num_tokens_per_tile;
     // Former reserved word: fixed at initialization; mode 1 requires matching new binaries.
     uint32_t num_layers, src_rank_idx, num_slots, return_progress_mode;
+    // Endpoint-group channel stride: 0 = legacy single-endpoint table; N = N channels
+    // per non-self peer (one local endpoint per (group, AIV)); table index = peer_base + aiv.
+    uint32_t channel_stride, reserved_pad0;
     uint64_t lanes_offset, peers_offset, addresses_offset, layers_offset;
     uint64_t context_bytes, payload_bytes, control_bytes, reserved_address;
     AFDWorkspace workspace;
@@ -65,9 +68,10 @@ struct alignas(32) AFDContextLayout {
 static_assert(sizeof(AFDTaskInfo)==64 && sizeof(AFDInbox)==64 && sizeof(AFDRoundLedger)==64);
 static_assert(sizeof(AFDControlBlock)==32 && sizeof(AFDSendState)==32);
 static_assert(sizeof(AFDLane)==32 && sizeof(AFDPeer)==32 && sizeof(AFDAddress)==64);
-static_assert(sizeof(AFDWorkspace)==96 && sizeof(AFDContextLayout)==224);
-static_assert(offsetof(AFDContextLayout,workspace)==128);
+static_assert(sizeof(AFDWorkspace)==96 && sizeof(AFDContextLayout)==256);
+static_assert(offsetof(AFDContextLayout,workspace)==160);
 static_assert(offsetof(AFDContextLayout,return_progress_mode)==60);
+static_assert(offsetof(AFDContextLayout,channel_stride)==64);
 constexpr __aicore__ __forceinline__ AFDWorkspace make_workspace(uint32_t c, uint32_t t, uint32_t k,
                                       uint32_t e, uint32_t n, uint32_t m, uint32_t slots) {
     AFDWorkspace w{}; uint64_t p=0, j=(uint64_t(c)+t-1)/t;

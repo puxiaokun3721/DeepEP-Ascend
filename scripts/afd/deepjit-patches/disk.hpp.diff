@@ -1,0 +1,20 @@
+--- a/cache/disk.hpp
++++ b/cache/disk.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <filesystem>
+ #include <format>
+ #include <string>
+@@ -68,7 +69,8 @@
+ 
+     ~DiskCacheEntry() {
+         // Best-effort cleanup; abrupt process termination may bypass the destructor.
+-        if (not hit and not committed)
++        if (not hit and not committed and std::getenv("EP_KEEP_TMP") == nullptr
++                and std::getenv("DJ_KEEP_TMP") == nullptr)
+             safe_remove_all(path);
+     }
+ };

@@ -58,6 +58,45 @@ __aicore__ inline Value recv_read(__gm__ const Value* source) {
         output[i]=AscendC::ReadGmByPassDCache(input+i);
     return value;
 }
+// [AFD] Complete field snapshots from UB scratch; per-field reads, no generic value write.
+__aicore__ inline AFDActive recv_read_active_ubuf(__ubuf__ const uint8_t* source) {
+    auto in=reinterpret_cast<__ubuf__ const uint32_t*>(source);
+    AFDActive value{};
+    value.valid=in[0];value.kind=in[1];value.phase=in[2];value.layer_idx=in[3];
+    value.num_entries=in[4];value.num_members=in[5];value.num_segments=in[6];
+    value.num_expanded_tokens=in[7];value.num_padded_tokens=in[8];value.reserved=in[9];
+    value.entries_offset=uint64_t(in[10])|(uint64_t(in[11])<<32);
+    value.members_offset=uint64_t(in[12])|(uint64_t(in[13])<<32);
+    value.segments_offset=uint64_t(in[14])|(uint64_t(in[15])<<32);
+    return value;
+}
+__aicore__ inline AFDExecutionState recv_read_execution_state_ubuf(__ubuf__ const uint8_t* source) {
+    auto in=reinterpret_cast<__ubuf__ const uint32_t*>(source);
+    AFDExecutionState value{};
+    value.stage=in[0];value.error_code=in[1];value.num_entries=in[2];
+    #pragma unroll
+    for(int i=0;i<5;++i) value.reserved[i]=in[3+i];
+    return value;
+}
+__aicore__ inline AFDInbox recv_read_inbox_ubuf(__ubuf__ const uint8_t* source) {
+    auto in=reinterpret_cast<__ubuf__ const uint32_t*>(source);
+    AFDInbox value{};
+    value.microbatch_idx=in[0];value.layer_idx=in[1];value.round_idx=in[2];
+    value.num_comm_rounds=in[3];value.num_round_tokens=in[4];value.return_bit=in[5];
+    value.num_recv_records=in[6];
+    #pragma unroll
+    for(int i=0;i<9;++i) value.reserved[i]=in[7+i];
+    return value;
+}
+__aicore__ inline AFDSendState recv_read_send_state_ubuf(__ubuf__ const uint8_t* source) {
+    auto in=reinterpret_cast<__ubuf__ const uint32_t*>(source);
+    AFDSendState value{};
+    value.next_input_bit=in[0];value.next_return_bit=in[1];
+    value.has_published=in[2];value.last_input_bit=in[3];
+    #pragma unroll
+    for(int i=0;i<4;++i) value.reserved[i]=in[4+i];
+    return value;
+}
 // [AFD] Validate arbitrary Segment order without pairwise interval scans. Only
 // uint32 indices are sorted; Active and payload stay immutable. Two bounded GM
 // arrays replace O(S^2) comparisons with O(S log S), without a hidden mirror.
@@ -146,14 +185,14 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
     auto ws=reinterpret_cast<__gm__ uint8_t*>(workspace);
     auto result=reinterpret_cast<__gm__ uint32_t*>(ws+32*kNumVecCores);
     recv_load(tmp,active,64);
-    const AFDActive task=*reinterpret_cast<__ubuf__ AFDActive*>(tmp);
+    const AFDActive task=recv_read_active_ubuf(tmp);
     // Immutable publication guarantees every launched AIV sees the same gate.
     // NOP/ABORT read no Context directory, Inbox, route or record.
     if(task.kind==ABORT && task.valid==0) return;
     if(vec_core_idx==0) {
         uint32_t error=OK;
         recv_load(tmp,execution_state,32);
-        const AFDExecutionState state=*reinterpret_cast<__ubuf__ AFDExecutionState*>(tmp);
+        const AFDExecutionState state=recv_read_execution_state_ubuf(tmp);
         if(task.kind==NOP && task.valid==0) {
             if(task.num_entries || task.num_members || task.num_segments || task.num_expanded_tokens ||
                task.num_padded_tokens || state.stage!=EMPTY || state.error_code!=OK || state.num_entries) error=STATE_ORDER;
@@ -194,7 +233,7 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
             // reject aligned aliases/overlapping regions before any count/ref read.
             uint64_t wire_end=0;
             for(int l=0;l<kNumSourceLanes && error==OK;++l) {
-                const auto lane=lanes[l];
+                const auto lane=recv_read(lanes+l);
                 if(lane.capacity==0 || lane.capacity>kMaxLaneTokens || lane.src_rank_idx>=context->num_src_ranks ||
                    lane.payload_slot_idx>=context->num_slots || uint64_t(lane.capacity)*kNumTopk>=UINT32_MAX) {error=BAD_ABI;break;}
                 const uint64_t record_offset=wire_end;wire_end+=align512(uint64_t(lane.capacity)*kNumTokenBytes);
@@ -203,7 +242,7 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
                 const uint64_t prefix_offset=wire_end;wire_end+=align32(4*uint64_t(kNumExpertsPerRank));
                 if(wire_end>payload_bytes) {error=BAD_ABI;break;}
                 for(int f=0;f<kNumRanks;++f) {
-                    const auto address=addresses[uint64_t(l)*kNumRanks+f];
+                    const auto address=recv_read(addresses+uint64_t(l)*kNumRanks+f);
                     if(address.records_offset!=record_offset || address.route_reference_offset!=ref_offset ||
                        address.count_offset!=count_offset || address.prefix_offset!=prefix_offset ||
                        address.inbox_offset!=uint64_t(l)*128 || address.input_ready_offset!=uint64_t(l)*128+64 ||
@@ -229,8 +268,8 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
                        member.delta_begin!=j*uint64_t(kNumExpertsPerRank)) {error=BAD_TASK;break;}
                     for(uint32_t k=0;k<j;++k)if(recv_read(members+(k)).source_lane_idx==member.source_lane_idx)error=BAD_TASK;
                     if(error!=OK)break;
-                    const auto lane=lanes[member.source_lane_idx];
-                    const auto address=addresses[uint64_t(member.source_lane_idx)*kNumRanks+rank_idx];
+                    const auto lane=recv_read(lanes+member.source_lane_idx);
+                    const auto address=recv_read(addresses+uint64_t(member.source_lane_idx)*kNumRanks+rank_idx);
                     if(lane.phase!=task.phase || lane.capacity==0 || lane.capacity>kMaxLaneTokens ||
                        !recv_range(address.records_offset,uint64_t(lane.capacity)*kNumTokenBytes,payload_bytes) ||
                        !recv_range(address.route_reference_offset,4*uint64_t(lane.capacity)*(kNumTopk<kNumExpertsPerRank?kNumTopk:kNumExpertsPerRank),payload_bytes) ||
@@ -239,7 +278,7 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
                        !recv_range(address.inbox_offset,64,control_bytes) ||
                        !recv_range(address.input_ready_offset,32,control_bytes)) {error=BAD_ABI;break;}
                     recv_load(tmp,reinterpret_cast<__gm__ uint8_t*>(control_buffer)+address.inbox_offset,64);
-                    const AFDInbox inbox=*reinterpret_cast<__ubuf__ AFDInbox*>(tmp);
+                    const AFDInbox inbox=recv_read_inbox_ubuf(tmp);
                     recv_load(tmp,reinterpret_cast<__gm__ uint8_t*>(control_buffer)+address.input_ready_offset,32);
                     if(words[0]!=member.input_bit || inbox.return_bit!=member.return_bit || inbox.layer_idx!=task.layer_idx ||
                        inbox.num_round_tokens>lane.capacity || inbox.num_recv_records>inbox.num_round_tokens ||
@@ -264,7 +303,7 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
                        segment.num_routes==0) {error=BAD_TASK;break;}
                     bool found=false;for(uint32_t m=entry.member_begin;m<next_member;++m)found|=recv_read(members+(m)).source_lane_idx==segment.source_lane_idx;
                     if(!found) {error=BAD_TASK;break;}
-                    const auto address=addresses[uint64_t(segment.source_lane_idx)*kNumRanks+rank_idx];
+                    const auto address=recv_read(addresses+uint64_t(segment.source_lane_idx)*kNumRanks+rank_idx);
                     auto prefix=reinterpret_cast<__gm__ const uint32_t*>(reinterpret_cast<__gm__ uint8_t*>(buffer)+address.prefix_offset);
                     const uint64_t begin=segment.local_expert_idx==0?0:recv_read(prefix+(segment.local_expert_idx-1)),end=recv_read(prefix+(segment.local_expert_idx));
                     if(segment.route_begin<begin || segment.route_begin>end || segment.num_routes>end-segment.route_begin) {error=BAD_ROUTE;break;}
@@ -344,10 +383,10 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
             const uint32_t segment_end=segment.dst_row_begin+segment.num_routes;
             const uint32_t limit=segment_end<end?segment_end:end;
             if(begin>=limit)continue;
-            const auto address=addresses[uint64_t(segment.source_lane_idx)*kNumRanks+rank_idx];
-            const auto lane=lanes[segment.source_lane_idx];
+            const auto address=recv_read(addresses+uint64_t(segment.source_lane_idx)*kNumRanks+rank_idx);
+            const auto lane=recv_read(lanes+segment.source_lane_idx);
             recv_load(tmp,reinterpret_cast<__gm__ uint8_t*>(control_buffer)+address.inbox_offset,64);
-            const auto inbox=*reinterpret_cast<__ubuf__ AFDInbox*>(tmp);
+            const auto inbox=recv_read_inbox_ubuf(tmp);
             auto refs=reinterpret_cast<__gm__ const uint32_t*>(reinterpret_cast<__gm__ uint8_t*>(buffer)+address.route_reference_offset);
             for(uint32_t row=begin;row<limit && error==OK;) {
                 const uint32_t num_stage_tokens=uint32_t(kNumTokensPerStage)<limit-row?kNumTokensPerStage:limit-row;
@@ -460,7 +499,7 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
             const uint32_t segment_end=segment.dst_row_begin+segment.num_routes;
             const uint32_t limit=segment_end<end?segment_end:end;
             if(begin>=limit)continue;
-            const auto address=addresses[uint64_t(segment.source_lane_idx)*kNumRanks+rank_idx];
+            const auto address=recv_read(addresses+uint64_t(segment.source_lane_idx)*kNumRanks+rank_idx);
             auto refs=reinterpret_cast<__gm__ const uint32_t*>(reinterpret_cast<__gm__ uint8_t*>(buffer)+address.route_reference_offset);
             uint32_t issue_row=begin;
             uint32_t stage_num_tokens[2]={0,0},stage_token_base_idx[2]={0,0};

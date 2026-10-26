@@ -42,5 +42,27 @@ static void __instantiate_kernel() {{
         control_buffer,rank_idx,sf_token_stride,sf_hidden_stride,
         config.payload_bytes,config.control_bytes,config.context_bytes);
 }
+static std::string compile_dispatch_send_only(const AFDContextLayout& config,int num_ub_bytes,int64_t num_timeout_cycles) {
+    return jit->compile_without_load("afd_dispatch_send",std::format(R"(
+#include <deep_ep/impls/afd/dispatch_send.hpp>
+using namespace deep_ep::afd;
+static void __instantiate_kernel() {{
+    auto ptr=reinterpret_cast<void*>(&deep_ep::afd::dispatch_impl<{},{},{},{},{},{},{},{},{},{}>);
+}}
+)",config.num_ranks,config.num_experts,config.num_topk,config.num_vec_cores,
+        config.num_hidden_bytes,config.num_sf_packs,config.num_max_tokens_per_rank,
+        config.num_tokens_per_tile,num_ub_bytes,num_timeout_cycles)).string();
+}
+static std::string compile_dispatch_recv_only(const AFDContextLayout& config,int q,int q_alloc,int alignment,int tile,int num_ub_bytes) {
+    return jit->compile_without_load("afd_dispatch_recv",std::format(R"(
+#include <deep_ep/impls/afd/dispatch_recv.hpp>
+using namespace deep_ep::afd;
+static void __instantiate_kernel() {{
+    auto ptr=reinterpret_cast<void*>(&deep_ep::afd::dispatch_copy_epilogue_impl<{},{},{},{},{},{},{},{},{},{},{},{},{}>);
+}}
+)",config.num_ranks,config.num_experts,config.num_topk,config.num_vec_cores,
+        config.num_hidden_bytes,config.num_sf_packs,config.num_source_lanes,config.num_layers,
+        q,q_alloc,alignment,tile,num_ub_bytes)).string();
+}
 } // namespace deep_ep::afd
 // ### PATCH END: AFD JIT launcher

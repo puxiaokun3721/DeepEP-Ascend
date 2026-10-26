@@ -1,0 +1,8 @@
+# Keep validated source and transport patch bytes stable on Windows and Linux.
+csrc/** text eol=lf
+deep_ep/** text eol=lf
+tests/afd/** text eol=lf
+scripts/afd/** text eol=lf
+docs/afd/deployment/** text eol=lf
+# Unified patches retain blank context lines with the required space prefix.
+scripts/afd/deepjit-patches/*.diff whitespace=-blank-at-eol

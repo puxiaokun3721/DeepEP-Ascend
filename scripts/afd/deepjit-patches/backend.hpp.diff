@@ -1,0 +1,47 @@
+--- a/backend/ascend/backend.hpp
++++ b/backend/ascend/backend.hpp
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <cstdlib>
++#include <exception>
+ #include <filesystem>
+ #include <memory>
+ #include <string>
+@@ -117,8 +119,34 @@
+ 
+         // Compile and link
+         const auto cd_command = "cd " + dir.string() + " && ";
+-        call_external_command(cd_command + bisheng_command, print_compiler_command);
+-        call_external_command(cd_command + linker_command, print_compiler_command);
++        const bool keep_tmp_files = std::getenv("EP_KEEP_TMP") != nullptr or
++                                    std::getenv("DJ_KEEP_TMP") != nullptr;
++        std::string bisheng_output;
++        try {
++            bisheng_output = call_external_command(cd_command + bisheng_command, print_compiler_command);
++        } catch (const std::exception& error) {
++            if (keep_tmp_files)
++                write_file_sync(dir / "bisheng.log",
++                                "=== merged stdout+stderr (command failed) ===\n" +
++                                std::string(error.what()));
++            throw;
++        }
++        if (keep_tmp_files)
++            write_file_sync(dir / "bisheng.log",
++                            "=== merged stdout+stderr ===\n" + bisheng_output);
++        std::string linker_output;
++        try {
++            linker_output = call_external_command(cd_command + linker_command, print_compiler_command);
++        } catch (const std::exception& error) {
++            if (keep_tmp_files)
++                write_file_sync(dir / "ld_lld.log",
++                                "=== merged stdout+stderr (command failed) ===\n" +
++                                std::string(error.what()));
++            throw;
++        }
++        if (keep_tmp_files)
++            write_file_sync(dir / "ld_lld.log",
++                            "=== merged stdout+stderr ===\n" + linker_output);
+         safe_remove_all(relocatable_path);
+         DJ_HOST_ASSERT(std::filesystem::is_regular_file(binary_path) and std::filesystem::file_size(binary_path) != 0,
+                        "Bisheng did not produce a valid Ascend binary: {}", binary_path.string());

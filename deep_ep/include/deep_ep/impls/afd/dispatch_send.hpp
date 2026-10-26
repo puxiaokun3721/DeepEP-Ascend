@@ -9,6 +9,7 @@
 #include <deep_ep/comm/handle.hpp>
 #include <deep_ep/common/simt.hpp>
 #include <deep_ep/layout/afd/token.hpp>
+#include <deep_ep/impls/afd/dispatch_recv.hpp>
 
 // ### PATCH START: bounded AFD sender, adapted from impls/ep/dispatch.hpp at 3b25377d
 namespace deep_ep::afd {
@@ -21,13 +22,13 @@ namespace deep_ep::afd {
 constexpr uint32_t kNumMaxPendingWrites=32;
 // [REUSE+AFD] Native DispatchUBLayout naming; AFD bounded tiles and control scratch.
 template <int kNumExperts, int kNumRanks, int kNumTopk, int kNumTokensPerTile,
-          int kNumMetadataBytes>
+          int kNumMetadataBytes, int kNumVecCores>
 struct alignas(32) DispatchUBLayout {
     alignas(32) int expert_histogram[kNumExperts], expert_cursor[kNumExperts];
     alignas(32) int rank_histogram[kNumRanks], rank_psum[kNumRanks];
     alignas(32) int dst_rank_idx[kNumTokensPerTile*kNumTopk], dst_slot_idx[kNumTokensPerTile*kNumTopk];
     alignas(32) handle::HcommPeerInfo peer_info[kNumRanks];
-    alignas(32) uint8_t jetty_info[96];
+    alignas(32) uint8_t jetty_info[kNumVecCores][kNumRanks][96];
     alignas(32) uint8_t ub_sqe[512];
     alignas(32) uint8_t control_stage[256];
     alignas(32) uint8_t metadata[2][4*kNumMetadataBytes];
@@ -36,9 +37,9 @@ struct alignas(32) DispatchUBLayout {
 // Original warp grouping, deduplicate and atomic histogram logic; no peer-rank self-copy.
 // Added fixed tiles, full int64 validation, optional masks, and a second route-emission pass.
 template <int kNumExperts, int kNumRanks, int kNumTopk, int kNumTokensPerTile,
-          int kNumMetadataBytes, bool kEmitRoutes>
+          int kNumMetadataBytes, int kNumVecCores, bool kEmitRoutes>
 __simt_vf__ __aicore__ __launch_bounds__(512) void route_tile(
-    __ubuf__ DispatchUBLayout<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes>* ub,
+    __ubuf__ DispatchUBLayout<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes,kNumVecCores>* ub,
     __gm__ int64_t* topk_idx, __gm__ uint8_t* token_mask,
     __gm__ uint32_t* counts, __gm__ uint32_t* tile_psum,
     __gm__ uint32_t* expert_prefix, __gm__ int32_t* dst_slots,
@@ -271,20 +272,20 @@ __global__ __vector__ void dispatch_impl(
     AscendC::InitSocState();
     constexpr TokenLayout token_layout{kNumHiddenBytes,kNumSFPacks*2,kNumTopk};
     constexpr int kNumMetadataBytes=token_layout.metadata_stride();
-    using UBLayout=DispatchUBLayout<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes>;
+    using UBLayout=DispatchUBLayout<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes,kNumVecCores>;
     static_assert(sizeof(UBLayout)<=kNumUbBytes && handle::HcommJetty::kNumMaxSQEBytes<=512);
     const int vec_core_idx=AscendC::GetBlockIdx();
     const auto ub=reinterpret_cast<__ubuf__ UBLayout*>(0);
     const auto stage=ub->control_stage;
     const auto words=reinterpret_cast<__ubuf__ uint32_t*>(stage);
-    const auto base=reinterpret_cast<__gm__ uint8_t*>(context);
+    const auto base=reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ AFDContextLayout*>(context));
     const auto lanes=reinterpret_cast<__gm__ const AFDLane*>(base+context->lanes_offset);
     const auto peers=reinterpret_cast<__gm__ const AFDPeer*>(base+context->peers_offset);
     const auto addresses=reinterpret_cast<__gm__ const AFDAddress*>(base+context->addresses_offset);
     const auto layers=reinterpret_cast<__gm__ const uint32_t*>(base+context->layers_offset);
     const auto ws=static_cast<__gm__ uint8_t*>(workspace);
     const auto controls=static_cast<__gm__ uint8_t*>(control_buffer);
-    const auto w=context->workspace;
+    const auto w=recv_read(&context->workspace);
     const auto error=reinterpret_cast<__gm__ uint32_t*>(ws+w.error_scratch);
     const auto counts=reinterpret_cast<__gm__ uint32_t*>(ws+w.tile_counts);
     const auto psum=reinterpret_cast<__gm__ uint32_t*>(ws+w.tile_psum);
@@ -326,21 +327,26 @@ __global__ __vector__ void dispatch_impl(
         return; // all launched AIVs take this branch after the same join
     }
     // S1 [REUSE] Per-AIV HcommJetty/peer preload; asymmetric AFD peer directory.
-    const auto lane=lanes[lane_idx];
+    const auto lane=recv_read(lanes+lane_idx);
     const auto state=reinterpret_cast<__gm__ AFDSendState*>(ws+w.send_state)+lane.payload_slot_idx;
-    handle::HcommJetty jetty(reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(ub->jetty_info),ub->ub_sqe,jetty_ptrs,vec_core_idx);
+    // [group B] Local SQ and peer metadata come from the same (peer, AIV) channel entry.
+    const bool channel_grouped=context->channel_stride!=0;
     // Original Hcomm SQ encoder assumes kSQDepth=32768 WQEBBs. Host validates that contract.
     // Native poll_cq_when_sq_overflow starts reclaim 10 completions before wrap;
     // keep an unpublished batch strictly below that threshold (minimum CQ=64).
     constexpr uint32_t kNumPollCQThreshold=10;
-    EP_DEVICE_ASSERT(jetty.jetty_info->cq_depth>kNumMaxPendingWrites+kNumPollCQThreshold &&
-        (jetty.jetty_info->cq_depth & (jetty.jetty_info->cq_depth-1))==0 &&
-        jetty.jetty_info->num_wqebb_bytes==handle::kNumWQEBBBytes);
+    {
+        handle::HcommJetty j0(reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(ub->jetty_info[vec_core_idx][0]),ub->ub_sqe,jetty_ptrs,
+            channel_grouped?int(peers[0].peer_idx)+vec_core_idx:vec_core_idx);
+        EP_DEVICE_ASSERT(j0.jetty_info->cq_depth>kNumMaxPendingWrites+kNumPollCQThreshold &&
+            (j0.jetty_info->cq_depth & (j0.jetty_info->cq_depth-1))==0 &&
+            j0.jetty_info->num_wqebb_bytes==handle::kNumWQEBBBytes);
+    }
     // Like native dispatch's peer_info preload, decode each peer once per AIV.
     // HcommPeer is a view of peer_info; rebinding the view below does not reload GM.
-    handle::HcommPeer peer(ub->peer_info,jetty_ptrs,peers[0].peer_idx);
+    handle::HcommPeer peer(ub->peer_info,jetty_ptrs,peers[0].peer_idx+(channel_grouped?vec_core_idx:0));
     for(int f=1;f<kNumRanks;++f) {
-        handle::HcommPeer preload_peer(ub->peer_info+f,jetty_ptrs,peers[f].peer_idx);
+        handle::HcommPeer preload_peer(ub->peer_info+f,jetty_ptrs,peers[f].peer_idx+(channel_grouped?vec_core_idx:0));
     }
     // S2 [AFD] Communication rounds, bounded by this physical lane capacity.
     // Each round: acquire slot -> route/count -> prefix -> emit/transfer -> publish.
@@ -351,7 +357,7 @@ __global__ __vector__ void dispatch_impl(
         // S2.1 [AFD] Previous input Consumed + free Ledger before slot reuse.
         const auto ledger=round_ledger+uint64_t(lane.payload_slot_idx)*2+(round%2);
         if(vec_core_idx==0) {
-            load_control(stage,state);const auto previous=*reinterpret_cast<__ubuf__ AFDSendState*>(stage);
+            load_control(stage,state);const auto previous=recv_read_send_state_ubuf(stage);
             bool ready=true;
             if(previous.has_published) for(int f=0;f<kNumRanks;++f)
                 ready=wait_control<kNumTimeoutCycles>(stage,controls+addresses[lane_idx*kNumRanks+f].consumed_offset,previous.last_input_bit)&&ready;
@@ -365,7 +371,7 @@ __global__ __vector__ void dispatch_impl(
         const uint32_t tiles=(length+kNumTokensPerTile-1)/kNumTokensPerTile;
         for(uint32_t tile=vec_core_idx;tile<tiles;tile+=kNumVecCores) {
             // S2.2 [REUSE+AFD] Warp rank dedup/histogram; AFD mask and route validation.
-            AscendC::Simt::VF_CALL<route_tile<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes,false>>(AscendC::Simt::Dim3(512,1,1),
+            AscendC::Simt::VF_CALL<route_tile<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes,kNumVecCores,false>>(AscendC::Simt::Dim3(512,1,1),
                 ub,topk_idx,token_mask,counts+tile*(kNumRanks+kNumExperts),psum+tile*(kNumRanks+kNumExperts),eprefix,dst_slots,refs,error,
                 begin,tile*kNumTokensPerTile,math::min(uint32_t(kNumTokensPerTile),length-tile*kNumTokensPerTile));
             asc_sync_notify(PIPE_V,PIPE_S,EVENT_ID0);asc_sync_wait(PIPE_V,PIPE_S,EVENT_ID0);
@@ -394,10 +400,9 @@ __global__ __vector__ void dispatch_impl(
         }
         local_join();
         // S2.4 [REUSE+AFD] Second route pass and metadata/payload production per tile.
-        uint32_t inflight=0;
         for(uint32_t tile=vec_core_idx;tile<tiles;tile+=kNumVecCores) {
             const uint32_t size=math::min(uint32_t(kNumTokensPerTile),length-tile*kNumTokensPerTile);
-            AscendC::Simt::VF_CALL<route_tile<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes,true>>(AscendC::Simt::Dim3(512,1,1),
+            AscendC::Simt::VF_CALL<route_tile<kNumExperts,kNumRanks,kNumTopk,kNumTokensPerTile,kNumMetadataBytes,kNumVecCores,true>>(AscendC::Simt::Dim3(512,1,1),
                 ub,topk_idx,token_mask,counts+tile*(kNumRanks+kNumExperts),psum+tile*(kNumRanks+kNumExperts),eprefix,dst_slots,refs,error,
                 begin,tile*kNumTokensPerTile,size);
             asc_sync_notify(PIPE_V,PIPE_S,EVENT_ID0);asc_sync_wait(PIPE_V,PIPE_S,EVENT_ID0);
@@ -483,26 +488,36 @@ __global__ __vector__ void dispatch_impl(
             asc_sync_wait(PIPE_MTE2,PIPE_S,EVENT_ID0);
             // S2.4b [REUSE+AFD] Native combine warp-per-WQE encoding, AFD record SGEs.
             // All metadata MTE3 reads/writes above must finish before SQ publication.
-            uint32_t num_task_tokens=0;
-            for(uint32_t i=0;i<size;++i) {
-                const uint32_t row=tile*kNumTokensPerTile+i,global=begin+row;
-                const auto gm_meta=ws+w.metadata_send_buffer+uint64_t(row)*kNumMetadataBytes;
-                for(int k=0;k<kNumTopk;++k) {
-                    const int f=ub->dst_rank_idx[i*kNumTopk+k];if(f<0)continue;
-                    peer.peer_info=ub->peer_info+f;
-                    const uint64_t off=addresses[lane_idx*kNumRanks+f].records_offset+uint64_t(ub->dst_slot_idx[i*kNumTopk+k])*token_layout.record_stride();
-                    append_write_task<2,kNumTimeoutCycles>(jetty,peer,off,
-                        static_cast<__gm__ uint8_t*>(x)+uint64_t(global)*kNumHiddenBytes,gm_meta,kNumHiddenBytes,kNumMetadataBytes,num_task_tokens,inflight);
+            // One local queue per (AIV, peer): write per peer and drain that queue
+            // before switching to the next peer, so no two queues share staging.
+            for(int f=0;f<kNumRanks;++f) {
+                handle::HcommJetty jetty_f(reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(ub->jetty_info[vec_core_idx][f]),ub->ub_sqe,jetty_ptrs,
+                    channel_grouped?int(peers[f].peer_idx)+vec_core_idx:vec_core_idx);
+                EP_DEVICE_ASSERT(jetty_f.jetty_info->cq_depth>kNumMaxPendingWrites+kNumPollCQThreshold &&
+                    (jetty_f.jetty_info->cq_depth & (jetty_f.jetty_info->cq_depth-1))==0 &&
+                    jetty_f.jetty_info->num_wqebb_bytes==handle::kNumWQEBBBytes);
+                uint32_t inflight=0,num_task_tokens=0;
+                for(uint32_t i=0;i<size;++i) {
+                    const uint32_t row=tile*kNumTokensPerTile+i,global=begin+row;
+                    const auto gm_meta=ws+w.metadata_send_buffer+uint64_t(row)*kNumMetadataBytes;
+                    for(int k=0;k<kNumTopk;++k) {
+                        if(ub->dst_rank_idx[i*kNumTopk+k]!=f)continue;
+                        peer.peer_info=ub->peer_info+f;
+                        const uint64_t off=addresses[lane_idx*kNumRanks+f].records_offset+uint64_t(ub->dst_slot_idx[i*kNumTopk+k])*token_layout.record_stride();
+                        append_write_task<2,kNumTimeoutCycles>(jetty_f,peer,off,
+                            static_cast<__gm__ uint8_t*>(x)+uint64_t(global)*kNumHiddenBytes,gm_meta,kNumHiddenBytes,kNumMetadataBytes,num_task_tokens,inflight);
+                    }
                 }
+                issue_write_task<2,kNumTimeoutCycles>(jetty_f,num_task_tokens,inflight);
+                flush_writes<kNumTimeoutCycles>(jetty_f,inflight);
             }
-            issue_write_task<2,kNumTimeoutCycles>(jetty,num_task_tokens,inflight);
-            flush_writes<kNumTimeoutCycles>(jetty,inflight);
         }
         local_join();
         if(AscendC::ReadGmByPassDCache(error)!=OK) break;
         if(vec_core_idx==0) {
             // S2.5 [AFD] After all AIV payload drains: route tables -> Inbox ->
             // Ledger -> InputReady -> next bits. No early InputReady/slot release.
+            // [group B] Route tables also use per-(AIV, peer) queues; drain each before publish.
             uint64_t route_base=0;
             for(int f=0;f<kNumRanks;++f) {
                 uint32_t routes=0;
@@ -512,14 +527,20 @@ __global__ __vector__ void dispatch_impl(
                 }
                 AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
                 peer.peer_info=ub->peer_info+f;
-                const auto address=addresses[lane_idx*kNumRanks+f];
-                if(routes)put_at_offset<kNumTimeoutCycles>(jetty,peer,address.route_reference_offset,refs+route_base,uint64_t(routes)*4,inflight);
-                put_at_offset<kNumTimeoutCycles>(jetty,peer,address.count_offset,ecounts+f*(kNumExperts/kNumRanks),(kNumExperts/kNumRanks)*4,inflight);
-                put_at_offset<kNumTimeoutCycles>(jetty,peer,address.prefix_offset,eprefix+f*(kNumExperts/kNumRanks),(kNumExperts/kNumRanks)*4,inflight);
+                handle::HcommJetty jetty_f(reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(ub->jetty_info[vec_core_idx][f]),ub->ub_sqe,jetty_ptrs,
+                    channel_grouped?int(peers[f].peer_idx)+vec_core_idx:vec_core_idx);
+                EP_DEVICE_ASSERT(jetty_f.jetty_info->cq_depth>kNumMaxPendingWrites+kNumPollCQThreshold &&
+                    (jetty_f.jetty_info->cq_depth & (jetty_f.jetty_info->cq_depth-1))==0 &&
+                    jetty_f.jetty_info->num_wqebb_bytes==handle::kNumWQEBBBytes);
+                uint32_t inflight=0;
+                const auto address=recv_read(addresses+lane_idx*kNumRanks+f);
+                if(routes)put_at_offset<kNumTimeoutCycles>(jetty_f,peer,address.route_reference_offset,refs+route_base,uint64_t(routes)*4,inflight);
+                put_at_offset<kNumTimeoutCycles>(jetty_f,peer,address.count_offset,ecounts+f*(kNumExperts/kNumRanks),(kNumExperts/kNumRanks)*4,inflight);
+                put_at_offset<kNumTimeoutCycles>(jetty_f,peer,address.prefix_offset,eprefix+f*(kNumExperts/kNumRanks),(kNumExperts/kNumRanks)*4,inflight);
+                flush_writes<kNumTimeoutCycles>(jetty_f,inflight);
                 route_base+=routes;
             }
-            flush_writes<kNumTimeoutCycles>(jetty,inflight);
-            load_control(stage,state);const AFDSendState saved=*reinterpret_cast<__ubuf__ AFDSendState*>(stage);
+            load_control(stage,state);const AFDSendState saved=recv_read_send_state_ubuf(stage);
             for(int f=0;f<kNumRanks;++f) {
                 for(int i=0;i<16;++i)words[i]=0;
                 auto inbox=reinterpret_cast<__ubuf__ AFDInbox*>(stage);

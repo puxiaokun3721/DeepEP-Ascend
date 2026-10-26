@@ -85,10 +85,10 @@ __global__ __vector__ void combine_recv_impl(
     if(AscendC::ReadGmByPassDCache(error)!=OK) {
         if(vec_core_idx==0){words[0]=3;words[1]=AscendC::ReadGmByPassDCache(error);store_control(recv_status,stage);}return;
     }
-    const auto lane=lanes[lane_idx];
+    const auto lane=recv_read(lanes+lane_idx);
     auto directory=reinterpret_cast<__gm__ const AFDReturnDirectory*>(ctx+context->reserved_address);
     auto return_lanes=reinterpret_cast<__gm__ const AFDReturnLane*>(ctx+directory->lanes_offset);
-    const auto return_lane=return_lanes[lane_idx];
+    const auto return_lane=recv_read(return_lanes+lane_idx);
     if(vec_core_idx==0) {
         if(directory->version!=1 || directory->return_stride<uint64_t(2)*H ||
             !lane.capacity || lane.capacity>kMaxLaneTokens ||
@@ -147,7 +147,12 @@ __global__ __vector__ void combine_recv_impl(
         asc_copy_gm2ub_align(reinterpret_cast<__ubuf__ uint8_t*>(&ub->ledger),reinterpret_cast<__gm__ uint8_t*>(ledger),
             1,64,0,0,true,asc_load_l2_cache_mode::NORMAL_FIRST_VICTIM,0,0);
         asc_sync_notify(PIPE_MTE2,PIPE_S,EVENT_ID3);asc_sync_wait(PIPE_MTE2,PIPE_S,EVENT_ID3);
-        const auto saved=ub->ledger;
+        AFDRoundLedger saved{};{
+            auto in=reinterpret_cast<__ubuf__ const uint32_t*>(&ub->ledger);
+            auto out=reinterpret_cast<uint32_t*>(&saved);
+            #pragma unroll
+            for(int i=0;i<int(sizeof(AFDRoundLedger)/sizeof(uint32_t));++i) out[i]=in[i];
+        }
         last_input_bit=saved.input_bit;
         const uint32_t token_begin=uint32_t(math::min(uint64_t(task.num_tokens),uint64_t(round_idx)*lane.capacity));
         const uint32_t num_tokens=math::min(lane.capacity,task.num_tokens-token_begin);
@@ -185,7 +190,8 @@ __global__ __vector__ void combine_recv_impl(
         for(uint32_t t=core_begin;t<core_end && code==OK;++t) {
             const uint32_t token_idx=token_begin+t;
             if(!is_live(t))continue;
-            asc_copy_gm2ub_align(ub->expert_idx,combined_topk_idx+uint64_t(token_idx)*K,1,8*K,0,0,true,
+            asc_copy_gm2ub_align(reinterpret_cast<__ubuf__ uint8_t*>(ub->expert_idx),
+                reinterpret_cast<__gm__ uint8_t*>(combined_topk_idx+uint64_t(token_idx)*K),1,8*K,0,0,true,
                 asc_load_l2_cache_mode::NORMAL_FIRST_VICTIM,0,0);
             asc_sync_notify(PIPE_MTE2,PIPE_S,EVENT_ID3);asc_sync_wait(PIPE_MTE2,PIPE_S,EVENT_ID3);
             for(int k=0;k<K;++k) {
@@ -234,7 +240,11 @@ __global__ __vector__ void combine_recv_impl(
                         asc_sync_wait(PIPE_MTE2,PIPE_V,event);
                         AscendC::Cast(value,combine_local(ub->input_stage[k%2],HC),AscendC::RoundMode::CAST_NONE,count);
                         AscendC::PipeBarrier<PIPE_V>();
-                        AscendC::Muls(value,value,ub->weights[k],count);AscendC::PipeBarrier<PIPE_V>();
+                        // Read the UB scalar before passing it to vector arithmetic.
+                        const float weight = combine_local(ub->weights,(K+7)/8*8).GetValue(k);
+                        asc_sync_notify(PIPE_S,PIPE_V,EVENT_ID4);
+                        asc_sync_wait(PIPE_S,PIPE_V,EVENT_ID4);
+                        AscendC::Muls(value,value,weight,count);AscendC::PipeBarrier<PIPE_V>();
                         AscendC::Add(acc,acc,value,count);AscendC::PipeBarrier<PIPE_V>();
                         if(k+2<K) {
                             asc_sync_notify(PIPE_V,PIPE_MTE2,event);asc_sync_wait(PIPE_V,PIPE_MTE2,event);

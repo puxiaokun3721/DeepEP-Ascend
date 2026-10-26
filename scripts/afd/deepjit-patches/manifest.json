@@ -1,0 +1,30 @@
+{
+  "base_commit": "65f513952b8771408a19202f65e36398522db6db",
+  "files": [
+    {
+      "path": "include/deep_jit/backend/ascend/options.hpp",
+      "before_sha256": "68ce2112434a6acb2bafdd1125d127ca8d60861b5524954feabb530831c3c473",
+      "after_sha256": "2fa590dae7c68ac89a011005d9258e1017b87ef505fedf775726cc7f3b63def3",
+      "patch": "options.hpp.diff"
+    },
+    {
+      "path": "include/deep_jit/cache/disk.hpp",
+      "before_sha256": "b2dcc7d8124a60e1b6199f3a2c5e34067921685f2fdd5684901ccb1940ade887",
+      "after_sha256": "7722b02af13449fee7a266bced76843f04eba1ac9bd9b8b1311e760c3d573d17",
+      "patch": "disk.hpp.diff"
+    },
+    {
+      "path": "include/deep_jit/backend/ascend/backend.hpp",
+      "before_sha256": "0b991603ef83d7d220c3cf18e7ce38d026ea2a40dbcf463512ba71e5ccdf349d",
+      "after_sha256": "374c53e066e6fa5b6c89304e67d5917dd8975ec858fb2b4d88d84f96e0bcae11",
+      "patch": "backend.hpp.diff"
+    }
+  ],
+  "executable_files": [
+    {
+      "path": "tests/test_ascend_proj/scripts/delayed_bisheng.py",
+      "sha256": "6960846abe22ca45748e0807b7a37250ec30cc7dc164f83b850718f3e752e35c",
+      "mode": "0755"
+    }
+  ]
+}
