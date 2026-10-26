@@ -1,0 +1,44 @@
+{
+  "stage": "IMAGE-019",
+  "evidence_commit": "6f8c96fcc9d9dff4e48c3c390829835773d2f721",
+  "evidence_scope": "Executor site checks; report payload SHA256 verified by reviewer. Large artifacts were not downloaded or rehashed on Windows. No new NPU test.",
+  "image": {
+    "tag": "afd-a5-validated-20261026:runtime-clean-v1",
+    "id": "sha256:92168578328b42fa412356a24e6bb6e9c2cab74e6bd1e7aa41adcddf037cf36b",
+    "os": "linux",
+    "architecture": "arm64",
+    "layers": 1,
+    "environment_entries": 43,
+    "working_directory": "/root",
+    "format": "docker save"
+  },
+  "artifacts": [
+    {
+      "file": "afd-a5-runtime-clean-v1.docker.tar",
+      "bytes": 23331106304,
+      "sha256": "e13fca93b567d2b1742b3a47fb660839f93fdc4baaa6b3599a9c361ba395bd25"
+    },
+    {
+      "file": "final_src.tar.gz",
+      "bytes": 347345,
+      "sha256": "8e715ae5af8956e8324bb0819399fa220e895a3b123fcb3e914343bee3024331"
+    },
+    {
+      "file": "_C.cpython-311-aarch64-linux-gnu.so",
+      "bytes": 6179944,
+      "sha256": "87c51bccbdc926d9bb31b339dba897fad30d87440910db97838a2b53debca145"
+    }
+  ],
+  "source_snapshot": "21e1b2380c6add42be64f173d064d3fb6d3e3165",
+  "source_archive": {"entries": 338, "deepjit_files": 102, "symlinks": 0},
+  "site_checks": {
+    "save_archive_full_listing_rc": 0,
+    "import_deep_ep_rc": 0,
+    "import_deep_ep_with_gcc14_libraries_rc": 0,
+    "credential_candidate_text_files_checked": 971,
+    "credential_candidate_hits": 0,
+    "scan_limit": "Candidate text/configuration and filesystem audit, not a bytewise scan of all SDK binaries or a guarantee of absence of every possible secret."
+  },
+  "external_requirements": ["Compatible A5 host driver and firmware", "Read-only driver/dcmi mounts", "Selected idle device nodes for hardware tests", "Target-specific network configuration"],
+  "not_included": ["Host driver/firmware", "Credentials", "Original work directory and old run logs", "JIT cache", "Source-machine network configuration"]
+}

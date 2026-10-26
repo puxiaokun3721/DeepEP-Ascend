@@ -12,6 +12,7 @@
 - 诊断：只读队列/RankGraph 入口、编译日志保留、退出阶段标记。
   保留它们以对应现场通过版本，不等于所有诊断入口都是已验证的公共 API。
 - 环境与迁移：[环境说明](environment.zh-CN.md)、[镜像迁移](image-transfer.zh-CN.md)。
+- 已打包环境：[IMAGE-019三包清单](image019-artifacts.json)、[加载与启动](image019-runtime.zh-CN.md)。镜像与源码/扩展分别搬迁，宿主驱动不在包内。
 
 ## 验收范围
 
