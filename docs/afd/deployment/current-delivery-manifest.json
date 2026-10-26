@@ -6,7 +6,8 @@
     "base_commit": "d551f01dc10a9ddc18fc6cff224c2db49f223914",
     "branch": "codex/a5-afd-return-stride-20261026",
     "delivery_commit": "the Git commit containing this manifest",
-    "kernel_or_host_changes_in_this_delivery": false
+    "kernel_or_host_changes_in_this_delivery": false,
+    "test_source_commit": "9a5ba9e379c718c03568154dbef869f396471e4a"
   },
   "recommended_entry": {
     "path": "tests/afd/run_threec_a5.py",
@@ -118,6 +119,18 @@
         "result": "46 strict CHECK results and reuse checks reported; stdout FUNCTION_PASS/RUN_PASS, but outer launcher terminal RESOURCE_CONFLICT with cancellation. Not a clean-terminal performance run.",
         "evidence_payload_sha256": "8d35ac11e88ea639a8584a34743393107ce30c4be3d54951f7cb09694677ce42",
         "guard_misidentification": "Executor interpretation of two own workers classified foreign; independent raw process identity verification remains limited."
+      },
+      {
+        "run_id": "prod_func21_D3c_20261027T023308",
+        "C": 512,
+        "rounds": 64,
+        "launcher_version": "v3.7.1",
+        "launcher_binding_note": "The three-C package section2 said v3.7; subsequent executor-c8fc94dd6490 explicitly corrected it to v3.7.1. Not v3.7.2.",
+        "runner_sha256": "e9c871d6b43d793c75495a7d13b0e3fcc66e30e4cc3bd6e8605bd392b3f7fddf",
+        "result": "Reported rc0/launcher0, wall762.68s, 46 strict zero-difference CHECKs, REUSE_BITS2/2, progress46/46, stop0/exited. Normal-path report, not independent complete resource/failure-path acceptance.",
+        "result_packet_commit": "a6414cd65909d24efb2c9d34ec597c82c6800e02",
+        "evidence_payload_sha256": "14c21658e25aff8f7cd9e161bc0caa2662b0a76b6521f95014f9a10309aa54ec",
+        "timing_scope": "20 samples per A reported by summary only; raw C4096/current C512 samples not yet independently recomputed."
       }
     ],
     "common_reported_parameters": {
@@ -131,7 +144,7 @@
     },
     "exact_launcher_argv": null,
     "argv_scope": "Parameters and run IDs above are reported bindings, not a reconstructed full site command/environment. README contains a recommended payload template.",
-    "C512_current_runner_result": "Functional observations retained separately from RESOURCE_CONFLICT outer terminal; the latest same-runner clean three-C set is incomplete.",
+    "C512_current_runner_result": "023308 adds a reported normal terminal; 014406/015853/023308 form the same-runner three-C function/reuse report for the current shape. Resource completeness, guard failure paths and native-equivalent comparison remain separate; 021409 cancellation is retained.",
     "acceptance_scope": "Device result/resource/raw-sample review belongs to the coordination report. This local source/CPU review does not add NPU acceptance."
   },
   "local_validation": {
@@ -200,7 +213,9 @@
     "reason": "Task-private remote configuration and separate resource/cancellation review; not required to expose it in public source delivery.",
     "latest_received_version": "v3.7.1",
     "latest_received_sha256": "0c71f4f01f0e42741696deffa59e6f938be52a2159a6e87792154193c3928ec3",
-    "review_status": "Full source received; CPU counterexamples identify ownership/final-stop/deadline gaps. Normal prior results do not validate failure cleanup. See coordination audit025_guard_v371_review artifacts.",
-    "normal_run_binding": "The received v3.7.1 is not retrospectively bound to earlier v3.6/v3.7 runs."
+    "review_status": "v3.7.1 full-source CPU counterexamples retained. v3.7.2 reports six targeted fixes and 15/15 CPU checks; changed source not yet independently received/reviewed. No v3.7.2 device run is reported.",
+    "normal_run_binding": "The received v3.7.1 is not retrospectively bound to earlier v3.6/v3.7 runs.",
+    "latest_reported_version": "v3.7.2",
+    "latest_reported_sha256": "105c0953a37a2ad6f987c55813ed44e83fc0014173fc8d9875d8e724f01b44d2"
   }
 }
