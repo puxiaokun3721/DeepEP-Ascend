@@ -1,30 +1,39 @@
 {
   "schema": 1,
   "updated_at": "2026-10-27",
-  "scope": "AUDIT025 runner delivery; limited identity functional and memory diagnostics, not final precision/lifecycle/performance acceptance",
+  "scope": "AUDIT025 exact four-card discriminating transaction-reuse and preliminary timing test delivery; evidence scope is recorded separately from source validation.",
   "source": {
-    "base_commit": "ea00eb597a8ab9835c47136a6a92717c05569d50",
+    "base_commit": "d551f01dc10a9ddc18fc6cff224c2db49f223914",
     "branch": "codex/a5-afd-return-stride-20261026",
     "delivery_commit": "the Git commit containing this manifest",
     "kernel_or_host_changes_in_this_delivery": false
   },
   "recommended_entry": {
-    "path": "tests/afd/run_pipeline_a5.py",
-    "bytes": 24861,
-    "sha256": "a55ec08a14c2d6de72b7f3667dc11b4bd9f06815a04bb5bcc7aa6bcbbe7d0815",
+    "path": "tests/afd/run_threec_a5.py",
+    "bytes": 26858,
+    "sha256": "e9c871d6b43d793c75495a7d13b0e3fcc66e30e4cc3bd6e8605bd392b3f7fddf",
+    "ast": "PASS",
     "site_byte_identity_verified": true,
-    "features": [
-      "ABI2 context reserved_address at offset 128",
-      "weights/routes/profile-trace/run-tag options",
-      "role budgets and conservative preflight v3",
-      "host FUNCSEG timing"
-    ],
+    "scope": "2A2F/H128/K2/MB1/Q1024/round-step; all valid; B32768; C32768/4096/512 comparison",
+    "oracle": {
+      "path": "tests/afd/discrim_oracle.py",
+      "bytes": 8171,
+      "sha256": "ba5d29cbfaf56cdea215d60309fedcb9fab6c4375ba02d36f9d44b641f5f9ffd",
+      "ast": "PASS"
+    },
+    "transaction_sequence": {
+      "warmup": 3,
+      "samples_per_A": 20,
+      "transaction_ids": "0..22",
+      "physical_slot": 0,
+      "same_owner": true
+    },
+    "timing_boundary": "Per-A host submit-to-complete, after local preparation synchronization and before current golden; includes protocol polling/F transform/peer waiting. Not pure kernel or global critical path.",
     "limitations": [
-      "Identity experts and repeated input rows cannot distinguish all expert/weight/token permutations.",
-      "Balanced routing does not send both experts of every token across the two F ranks.",
-      "FUNCSEG includes CPU golden and polling, excludes the final barrier; trace includes the final barrier.",
-      "Compile-only preparation is not a completed-transaction warmup.",
-      "Owner and Torch memory counters have different, overlapping scopes; neither is total device HBM."
+      "Legacy route/weight/all-masked flags do not select alternate current cases.",
+      "Parser acceptance is not two-card/MB>1/FP8/high-H/eight-card coverage.",
+      "B=capacity leaves the capacity-tail assertion empty.",
+      "No native-equivalent acceleration or complete SDK/HBM accounting is established."
     ]
   },
   "legacy_entry": {
@@ -47,8 +56,8 @@
     "module_relative_path": "deep_ep/_C.cpython-311-aarch64-linux-gnu.so",
     "module_bytes": 6179696,
     "module_sha256": "016888d24a7825dc77340c746622af9ae236e6a20d89e18d13cdb4eb63b10725",
-    "exact_loaded_module_path": null,
-    "path_status": "Full PYTHONPATH/import root supplied in d62e0d64; actual loaded module absolute path from normal RUNCFG still pending, not inferred from the root.",
+    "exact_loaded_module_path": "/work/bringup/A5-AFD-20261025-JETTY0-DIAG/src/br_repo_jetty0diag/deep_ep/_C.cpython-311-aarch64-linux-gnu.so",
+    "path_status": "Reported actual module path in the current delivery-diffs payload; locally received source hashes verified, binary not locally rehashed.",
     "binary_locally_rebuilt_or_rehashed": false,
     "run_pkg_bytes": 15391,
     "run_pkg_sha256": "cba4d906d743f53e559e039ab652e59dfa230a4c935bd7ad40168551ca6ab960",
@@ -74,6 +83,84 @@
     "historical_manifest_scope": "Existing validated-source/environment/IMAGE019 manifests describe their original snapshots; they do not certify this delivery unchanged."
   },
   "run_evidence": {
+    "repository": "https://github.com/puxiaokun3721/afd-a5-validation",
+    "full_source_payload": {
+      "bytes": 66443,
+      "sha256": "8d35ac11e88ea639a8584a34743393107ce30c4be3d54951f7cb09694677ce42",
+      "source_packet_commit": "0e8f7bc650e59d680fdf9d7de01b4eef5aba4716",
+      "note": "All eight immutable message parts and all three current source byte streams were independently SHA256 verified."
+    },
+    "reported_runs": [
+      {
+        "run_id": "prod_func21_D3a_20261027T014406",
+        "C": 32768,
+        "rounds": 1,
+        "result": "rc0, 46 strict CHECK results, REUSE_BITS and ledger-bank checks reported",
+        "runner_sha256": "e9c871d6b43d793c75495a7d13b0e3fcc66e30e4cc3bd6e8605bd392b3f7fddf",
+        "evidence_payload_sha256": "215b30f5b89dcc0e6e954ccad87b271de6b6acd7fbec3ce45febba1c0f82a4ff",
+        "launcher_version": "v3.6"
+      },
+      {
+        "run_id": "prod_func21_D3b_20261027T015853",
+        "C": 4096,
+        "rounds": 8,
+        "result": "rc0, 46 strict CHECK results, REUSE_BITS and ledger-bank checks reported",
+        "runner_sha256": "e9c871d6b43d793c75495a7d13b0e3fcc66e30e4cc3bd6e8605bd392b3f7fddf",
+        "evidence_payload_sha256": "c97559f1cb13f45061b5d9a47c414c484b89ec599cf3010ec6d26fab7aa9d63b",
+        "launcher_version": "v3.7"
+      },
+      {
+        "run_id": "prod_func21_D3c_20261027T021409",
+        "C": 512,
+        "rounds": 64,
+        "launcher_version": "v3.7",
+        "runner_sha256": "e9c871d6b43d793c75495a7d13b0e3fcc66e30e4cc3bd6e8605bd392b3f7fddf",
+        "result": "46 strict CHECK results and reuse checks reported; stdout FUNCTION_PASS/RUN_PASS, but outer launcher terminal RESOURCE_CONFLICT with cancellation. Not a clean-terminal performance run.",
+        "evidence_payload_sha256": "8d35ac11e88ea639a8584a34743393107ce30c4be3d54951f7cb09694677ce42",
+        "guard_misidentification": "Executor interpretation of two own workers classified foreign; independent raw process identity verification remains limited."
+      }
+    ],
+    "common_reported_parameters": {
+      "B": 32768,
+      "H": 128,
+      "K": 2,
+      "MB": 1,
+      "Q": 1024,
+      "warmup": 3,
+      "samples": 20
+    },
+    "exact_launcher_argv": null,
+    "argv_scope": "Parameters and run IDs above are reported bindings, not a reconstructed full site command/environment. README contains a recommended payload template.",
+    "C512_current_runner_result": "Functional observations retained separately from RESOURCE_CONFLICT outer terminal; the latest same-runner clean three-C set is incomplete.",
+    "acceptance_scope": "Device result/resource/raw-sample review belongs to the coordination report. This local source/CPU review does not add NPU acceptance."
+  },
+  "local_validation": {
+    "python_ast": "Both new sources parse; exact SHA256 and byte counts match received full source packet.",
+    "oracle_selftest": "18/18 PASS on local CPU",
+    "bounded_independent_check": "2944 unique B64/H128 input rows across source0..1 and txn0..22, BF16 exact; 144 scalar staged-rounding points match; full B32768 uniqueness follows the documented residue bounds.",
+    "source_changes_reviewed": "Oracle only empty-selection rejection/selftests; runner DONE/progress/bit parity/ledger release, per-transaction sweep reset and premeasurement synchronization verified in actual source.",
+    "hardware_acceptance_added": false
+  },
+  "historical_pipeline_entry": {
+    "path": "tests/afd/run_pipeline_a5.py",
+    "bytes": 24861,
+    "sha256": "a55ec08a14c2d6de72b7f3667dc11b4bd9f06815a04bb5bcc7aa6bcbbe7d0815",
+    "site_byte_identity_verified": true,
+    "features": [
+      "ABI2 context reserved_address at offset 128",
+      "weights/routes/profile-trace/run-tag options",
+      "role budgets and conservative preflight v3",
+      "host FUNCSEG timing"
+    ],
+    "limitations": [
+      "Identity experts and repeated input rows cannot distinguish all expert/weight/token permutations.",
+      "Balanced routing does not send both experts of every token across the two F ranks.",
+      "FUNCSEG includes CPU golden and polling, excludes the final barrier; trace includes the final barrier.",
+      "Compile-only preparation is not a completed-transaction warmup.",
+      "Owner and Torch memory counters have different, overlapping scopes; neither is total device HBM."
+    ]
+  },
+  "historical_pipeline_evidence": {
     "repository": "https://github.com/puxiaokun3721/afd-a5-validation",
     "source_packet_commit": "9d6c5a13457ff89a6450fcd38f1150dbb58399b0",
     "result_packet_commit": "a93f44a8cdda06eaf30a0991840b1b2a789dbbcd",
@@ -108,14 +195,12 @@
     "acceptance_scope": "Limited identity functional observation; resource/raw-log review is separate. Not an accepted steady-state or native-relative performance sample. Active-period positive worker observations supersede the earlier all-empty process-table summary.",
     "latest_oracle_packet_commit": "d62e0d64dd954cf22dc0e0e6285a9b58d834f6cd"
   },
-  "next_increment": {
-    "D1_D2_included": false,
-    "status": "Oracle v4 (87f6e5c) received and executor reports restoring strict runner comparison; local CPU review and strict device precision/lifecycle results remain pending. Earlier tolerance-only PASS does not close precision. D1/D2 sources are not included in this delivery."
-  },
-  "local_validation": {
-    "python_ast": "Both delivered scripts parse; no runtime imports or NPU execution.",
-    "pipeline_full_sha256": "Matches the eight-version independently reassembled site artifact.",
-    "send_recv_diff": "Exactly two ABI field corrections; Task width unchanged.",
-    "hardware_acceptance_added": false
+  "site_launcher": {
+    "included": false,
+    "reason": "Task-private remote configuration and separate resource/cancellation review; not required to expose it in public source delivery.",
+    "latest_received_version": "v3.7.1",
+    "latest_received_sha256": "0c71f4f01f0e42741696deffa59e6f938be52a2159a6e87792154193c3928ec3",
+    "review_status": "Full source received; CPU counterexamples identify ownership/final-stop/deadline gaps. Normal prior results do not validate failure cleanup. See coordination audit025_guard_v371_review artifacts.",
+    "normal_run_binding": "The received v3.7.1 is not retrospectively bound to earlier v3.6/v3.7 runs."
   }
 }

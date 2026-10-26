@@ -1,6 +1,8 @@
 > AUDIT025 current delivery (2026-10-27): see
 > [current-delivery-manifest.json](current-delivery-manifest.json) and
 > [the recommended entry scope](../../../tests/afd/README.md).
+> Current exact test sources are `run_threec_a5.py` and `discrim_oracle.py`;
+> CPU/source verification and reported device results have separate scopes.
 > The page below and the existing validated-source/IMAGE019 manifests are
 > historical snapshots. Their source hashes and image contents do not certify
 > the current runner/stride changes; they remain available for provenance.

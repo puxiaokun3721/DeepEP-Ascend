@@ -2,24 +2,86 @@
 
 ## Current delivery (AUDIT025, 2026-10-27)
 
-Use `run_pipeline_a5.py` for the limited identity-expert functional and memory
-diagnostics recorded in the [current delivery manifest](../../docs/afd/deployment/current-delivery-manifest.json).
-The manifest binds the delivered bytes, reported runtime, exact reported script
-argv and run ID, and pending evidence. This entry is not a high-discriminability
-precision test, transaction-reuse verdict or steady-state performance benchmark.
-`run_send_recv_a5.py` is historical and not recommended: its Task ABI version and
-Context address-table read are corrected, but it still installs a synthetic F
-fixture. D1/D2 correctness and lifecycle work will be delivered separately after
-the known oracle corrections; no D1/D2 PASS is claimed by this update.
+The recommended entry is `run_threec_a5.py` with `discrim_oracle.py`, delivered
+byte-for-byte from the site source packet. See the [current delivery manifest](../../docs/afd/deployment/current-delivery-manifest.json)
+for full hashes, reported runtime bindings and evidence limits. This delivery
+adds test sources and documentation; it does not change host or device kernels.
 
-The sections and commands below retain their original historical scope. Current
-authorization permits necessary configuration/dependency work in a dedicated
-container after checking that writes do not reach shared mounts; do not modify
-shared host packages or other jobs. Check every selected device before launch
-and during execution, and bound cleanup to this run on conflict or uncertainty.
-No reviewer ACK or two-card rerun is introduced by this delivery.
+The supported report scope is **four ranks, 2A2F, H128, K2, MB1, Q1024 and
+round-step**. Every valid token crosses both F ranks, experts apply distinct
+deterministic transforms, and top-k weights are unequal and vary. Inputs encode
+source, token and transaction without BF16 collisions within source0..1,
+token0..32767 and transaction0..22. The oracle rounds each F result to BF16,
+weights and accumulates in FP32, then rounds the final result to BF16.
 
-## Current multi-slot/multi-round A5 bring-up (2026-10-21, not executed here)
+The same owner and physical slot0 execute three warmup transactions and 20
+measured transactions. Each transaction has distinct data; matching transaction
+numbers use the same input/routing/weight sequence across the three C values.
+DONE, expected round count, return-bit parity and both local ledger bank states
+are checked after each completion. These checks do not certify every possible
+late-contribution or partial-failure path.
+
+Run the CPU oracle self-check independently:
+
+```bash
+python -B tests/afd/discrim_oracle.py
+```
+
+Example test payload, to be run under the site's existing task-private resource
+guard and bounded cleanup path after verifying all selected cards and their
+physical/container/rank mapping:
+
+```bash
+torchrun --standalone --nproc_per_node=4 tests/afd/run_threec_a5.py \
+  --batch 32768 --window 32768 --q 1024 --microbatches 1 --round-step \
+  --warmup 3 --samples 20 --timeout-seconds 900 --run-tag UNIQUE_RUN_ID
+```
+
+Use unique result directories and preserve the logs. After a completed run with
+known cleanup state, repeat serially on the same available card group with only
+`--window` changed to 4096 and 512. This example is a payload template, not a full
+site launcher/environment reconstruction; the Python runner does not replace
+the resource guard. A blocking runtime call still needs the existing external
+deadline/cancellation owner. Do not start a second run while own residual state
+is unknown, or continue through a resource conflict. No reviewer ACK is required.
+
+Primary latency samples omit `--profile-trace`. Each A rank synchronizes its own
+preparation before starting its timer and ends after send/receive completion;
+its CPU golden and completion diagnostics follow the timer. The reported value
+is **per-A host submit-to-complete transaction latency**: it includes protocol
+polling, F transformation and waiting for peers. There is no common A-start
+barrier, so it is not pure kernel time or the global critical path. Pair raw
+samples by run tag and transaction index; do not add concurrent rank durations.
+Twenty samples give an initial median/tail observation, not a stability claim.
+Profiler traces are separate diagnostic observations. No native DeepEP speedup
+is established by this delivery.
+
+Memory categories must stay separate: owner-known allocation, caller tensor
+model, Torch allocated/reserved/peak and available process/device observations.
+They overlap and do not sum to total HBM. Missing SDK memory remains unknown.
+
+This entry uses table-driven routes/weights and an all-valid mask. Its legacy
+`--routes`, `--weights` and `--all-masked` options do not select alternate cases.
+Do not infer two-card, MB>1, FP8, high-H or eight-card coverage from parser flags.
+With B equal to the allocated capacity the capacity-tail check is empty; it is
+not tail-case evidence. Prior masked/zero-length/tail tests retain their original
+scope separately.
+
+`run_pipeline_a5.py` remains available for historical identity-expert diagnostics.
+`run_send_recv_a5.py` remains a historical synthetic fixture, not a recommended
+precision or lifecycle entry. Existing logs and historical manifests remain
+unchanged. The historical image has not been verified to contain these latest
+test sources. Follow [environment setup](../../docs/afd/deployment/environment.zh-CN.md),
+rebuild privately when required, and record the actual imported module and hash;
+do not claim immediate reproduction on another machine from the image tag alone.
+
+The historical sections below describe their original environment and scope.
+Current user authorization permits necessary changes inside a dedicated
+container after verifying that writes do not reach shared mounts; host packages,
+shared SDK/driver/network state and other jobs must remain untouched. The private
+site launcher is intentionally not included in this source delivery.
+
+## Historical multi-slot/multi-round A5 bring-up (2026-10-21, not current acceptance)
 
 `run_pipeline_a5.py` accepts `--microbatches 1|2|3` (default 1) and
 `--round-step` (default off). Defaults preserve the prior single-slot multi-round
