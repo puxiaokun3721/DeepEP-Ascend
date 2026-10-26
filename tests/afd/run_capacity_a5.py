@@ -36,7 +36,7 @@ def check_return_layout():
     """Observe the real host constructor's directory, without launching kernels."""
     results = []
     # Two physical slots of the same source prove that compact rows do not overlap.
-    lanes = [[0, 0, 0, 0, 0, 2], [0, 1, 0, 0, 0, 3]]
+    lanes = [[0, 0, 0, 0, 0, 2], [0, 1, 0, 1, 0, 2]]
     for hidden, expected_stride in RETURN_LAYOUT_CASES:
         owner = deep_ep.AFDBuffer.create_local_receiver(
             1, 0, lanes, [0], hidden, 0, RETURN_TEST_TOPK, 2,
