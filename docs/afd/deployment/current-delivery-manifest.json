@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated_at": "2026-10-27",
+  "updated_at": "2026-10-28",
   "scope": "AUDIT025 exact four-card discriminating transaction-reuse and preliminary timing test delivery; evidence scope is recorded separately from source validation.",
   "source": {
     "base_commit": "d551f01dc10a9ddc18fc6cff224c2db49f223914",
@@ -211,9 +211,12 @@
   "site_launcher": {
     "included": false,
     "reason": "Task-private remote configuration and separate resource/cancellation review; not required to expose it in public source delivery.",
-    "latest_received_version": "v3.7.1",
-    "latest_received_sha256": "0c71f4f01f0e42741696deffa59e6f938be52a2159a6e87792154193c3928ec3",
-    "review_status": "v3.7.1 full-source CPU counterexamples retained. v3.7.2 reports six targeted fixes and 15/15 CPU checks; changed source not yet independently received/reviewed. No v3.7.2 device run is reported.",
+    "latest_received_version": "v3.7.2",
+    "latest_received_sha256": "105c0953a37a2ad6f987c55813ed44e83fc0014173fc8d9875d8e724f01b44d2",
+    "latest_received_bytes": 30847,
+    "review_status": "v3.7.2 was reconstructed from 13 exact-context hunks and SHA256 verified. Independent selected-AST CPU checks reproduce four remaining cases (pre-spawn UNKNOWN admission, reparent identity lookup, monitoring consuming cleanup time, fresh normal-tail cleanup timeouts) and recognize four repaired branches. These are code counterexamples, not observed device events; no v3.7.2 device run is reported. Historical v3.7.1 evidence is retained.",
+    "coordination_cpu_review": "reports/PROD-001/audit025_guard_v372_review.json",
+    "coordination_current_report": "reports/oversight/independent-review-followthrough-025.md",
     "normal_run_binding": "The received v3.7.1 is not retrospectively bound to earlier v3.6/v3.7 runs.",
     "latest_reported_version": "v3.7.2",
     "latest_reported_sha256": "105c0953a37a2ad6f987c55813ed44e83fc0014173fc8d9875d8e724f01b44d2"
