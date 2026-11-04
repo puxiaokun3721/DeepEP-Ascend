@@ -44,6 +44,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_property_readonly("workspace",&AFDBuffer::workspace)
         .def_property_readonly("send_status",&AFDBuffer::send_status)
         .def_property_readonly("payload",&AFDBuffer::payload)
+        // CAM test wiring: launch parameters as attrs and the device jetty table.
+        .def("camConfig",&AFDBuffer::cam_config)
+        .def_property_readonly("jetty_ptrs",&AFDBuffer::jetty_ptrs)
         .def("memory_usage",&AFDBuffer::memory_usage)
         .def("destroy",&AFDBuffer::destroy)
         .def("dispatchSend",&AFDBuffer::dispatchSend)

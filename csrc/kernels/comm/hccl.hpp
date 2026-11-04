@@ -24,10 +24,22 @@
 
 #include <deep_ep/common/math.hpp>
 #include <deep_ep/common/exception.hpp>
+#include <cstdlib>
 
 #include "symmetric.hpp"
 
 namespace deep_ep {
+
+// Transport layer selector: 0 = in-box UB mesh plane (default), 1 = supernode Clos plane.
+// Invalid values fail fast at first use; layer presence is checked against the rank graph.
+static uint32_t net_layer_from_env() {
+    const char* s = std::getenv("EP_HCCL_NET_LAYER");
+    if (s == nullptr or s[0] == char(0)) return 0;
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(s, &end, 10);
+    EP_HOST_ASSERT(end != nullptr and *end == char(0) and v < 65536ul);
+    return static_cast<uint32_t>(v);
+}
 
 struct HCCLContext {
     std::shared_ptr<symmetric::SymmetricMemory> memory;
@@ -111,16 +123,16 @@ struct HCCLContext {
             HCCL_CHECK(HcclRankGraphGetLayers(comm, &layers, &num_layers));
             EP_HOST_ASSERT(num_layers > 1);
             // HCCL owns `layers` and subsequent calls may invalidate it, so copy the layer value immediately.
-            // Copy/check the explicit layer ID before any later SDK call.
-            constexpr uint32_t kDiagnosticTransportLayer = 0;
-            bool has_ubmem_layer = false;
+            // Read/check the configured layer ID before any later SDK call.
+            const uint32_t transport_layer = net_layer_from_env();
+            bool has_layer = false;
             for (uint32_t i = 0; i < num_layers; ++i)
-                has_ubmem_layer = has_ubmem_layer or layers[i] == kDiagnosticTransportLayer;
-            EP_HOST_ASSERT(has_ubmem_layer);
+                has_layer = has_layer or layers[i] == transport_layer;
+            EP_HOST_ASSERT(has_layer);
 
             // Both transport paths use the checked layer ID; protocols remain unchanged.
-            acquire_ubmem_channels(kDiagnosticTransportLayer);
-            acquire_jetties(kDiagnosticTransportLayer, num_jetties, buffer_uid, num_cpu_timeout_secs);
+            acquire_ubmem_channels(transport_layer);
+            acquire_jetties(transport_layer, num_jetties, buffer_uid, num_cpu_timeout_secs);
         }
     }
 

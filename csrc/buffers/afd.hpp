@@ -15,6 +15,7 @@
 #include <deep_ep/layout/afd/return.hpp>
 #include <deep_ep/layout/afd/scheduler.hpp>
 #include "../utils/tensor.hpp"
+#include <torch_npu/csrc/aten/common/from_blob.h>
 #include "../kernels/comm/hccl.hpp"
 #include "../kernels/afd/dispatch.hpp"
 #include "../kernels/afd/remaining.hpp"
@@ -265,8 +266,8 @@ public:
         owned_context=byte_tensor(config.context_bytes);
         ACL_CHECK(aclrtMemcpy(owned_context.data_ptr(),config.context_bytes,packed.data(),packed.size(),ACL_MEMCPY_HOST_TO_DEVICE));
         auto options=torch::TensorOptions().dtype(torch::kByte).device(TORCH_DEVICE_NPU);
-        owned_payload=torch::from_blob(payload_context->buffer,{int64_t(payload_bytes)},[owner=payload_context](void*){},options);
-        owned_control=torch::from_blob(control_context->buffer,{int64_t(control_bytes)},[owner=control_context](void*){},options);
+        owned_payload=at_npu::native::from_blob(payload_context->buffer,{int64_t(payload_bytes)},[owner=payload_context](void*){},options);
+        owned_control=at_npu::native::from_blob(control_context->buffer,{int64_t(control_bytes)},[owner=control_context](void*){},options);
         owned_workspace=byte_tensor(config.workspace.num_bytes);zero_tensor(owned_workspace);
         owned_ledger=byte_tensor(ledger_bytes);zero_tensor(owned_ledger);
         owned_status=torch::empty({8},options.dtype(torch::kUInt32));zero_tensor(owned_status);
@@ -288,6 +289,58 @@ public:
     torch::Tensor send_status()const{return owned_status;}
     torch::Tensor payload()const{return owned_payload;}
     std::array<uint64_t,3> memory_usage()const{return {known_allocation_bytes,transport_reserve_bytes,budget_bytes};}
+    // ### PATCH START: CAM test wiring (migration harness, not used in production)
+    // The CAM port takes every launch parameter as a tiling attribute. Expose the
+    // exact values this owner validated so the harness cannot drift from the
+    // JIT-launched production path.
+    std::map<std::string,int64_t> cam_config()const {
+        using namespace afd;
+        EP_HOST_ASSERT(!closed);
+        const uint32_t lanes=config.num_source_lanes;
+        const uint32_t per_rank=config.num_ranks?config.num_experts/config.num_ranks:0;
+        std::map<std::string,int64_t> c;
+        c["num_ranks"]=config.num_ranks;
+        c["num_src_ranks"]=config.num_src_ranks;
+        c["num_experts"]=config.num_experts;
+        c["num_topk"]=config.num_topk;
+        c["num_source_lanes"]=config.num_source_lanes;
+        c["num_layers"]=config.num_layers;
+        c["num_vec_cores"]=config.num_vec_cores;
+        c["num_ub_bytes"]=num_ub_bytes;
+        c["num_token_capacity"]=config.num_token_capacity;
+        c["num_tokens_per_tile"]=config.num_tokens_per_tile;
+        c["num_slots"]=config.num_slots;
+        c["num_hidden_bytes"]=config.num_hidden_bytes;
+        c["num_sf_packs"]=config.num_sf_packs;
+        c["payload_bytes"]=int64_t(config.payload_bytes);
+        c["control_bytes"]=int64_t(config.control_bytes);
+        c["context_bytes"]=int64_t(config.context_bytes);
+        c["timeout_cycles"]=timeout_cycles;
+        c["recv_rank"]=recv_rank;
+        c["recv_q"]=recv_q;
+        c["recv_q_alloc"]=recv_q_alloc;
+        c["recv_alignment"]=recv_alignment;
+        c["recv_tile"]=recv_tile;
+        c["combine_tile"]=combine_tile;
+        c["combine_chunk"]=combine_chunk;
+        c["completion_bytes"]=int64_t(completion_bytes(lanes,per_rank));
+        c["return_progress_bytes"]=combine_recv_round_step?
+            int64_t(sizeof(AFDReturnProgress))*int64_t(config.num_slots):0;
+        c["round_step"]=combine_recv_round_step?1:0;
+        return c;
+    }
+    // Device jetty table (ChannelHandle array, uint64 each) as an int64 tensor.
+    // The storage belongs to payload_context; the borrowed tensor must not
+    // outlive this owner and the caller must not free it.
+    torch::Tensor jetty_ptrs()const {
+        EP_HOST_ASSERT(!closed && payload_context && payload_context->jetty_device_ptrs);
+        EP_HOST_ASSERT(payload_context->channel_handles.size()<=uint64_t(INT64_MAX));
+        return at_npu::native::from_blob(payload_context->jetty_device_ptrs,
+            {int64_t(payload_context->channel_handles.size())},
+            [owner=payload_context](void*) {},
+            torch::TensorOptions().dtype(torch::kInt64).device(TORCH_DEVICE_NPU));
+    }
+    // ### PATCH END: CAM test wiring
     // All ranks must first stop launches and finish their transactions, including final ACK.
     // Synchronize before dropping owner references; outstanding exported tensors retain allocations.
     void destroy() {

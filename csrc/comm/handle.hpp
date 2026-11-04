@@ -6,10 +6,22 @@
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <cstdlib>
 
 #include "barrier.hpp"
 
 namespace deep_ep::comm {
+
+// Transport layer selector: 0 = in-box UB mesh plane (default), 1 = supernode Clos plane.
+// Invalid values fail fast at first use; layer presence is checked against the rank graph.
+static uint32_t net_layer_from_env() {
+    const char* s = std::getenv("EP_HCCL_NET_LAYER");
+    if (s == nullptr or s[0] == char(0)) return 0;
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(s, &end, 10);
+    EP_HOST_ASSERT(end != nullptr and *end == char(0) and v < 65536ul);
+    return static_cast<uint32_t>(v);
+}
 
 static pybind11::bytearray get_local_unique_id() {
     HcclRootInfo root_info;
@@ -49,8 +61,12 @@ static std::tuple<int, int> get_physical_domain_size(const std::string& hccl_gro
     uint32_t* layers = nullptr;
     uint32_t num_layers = 0;
     HCCL_CHECK(HcclRankGraphGetLayers(comm, &layers, &num_layers));
-    EP_HOST_ASSERT(num_layers > 1);
-    const auto layer = layers[1];
+    // Configurable transport layer (default 0 = in-box UB mesh; 1 = external Clos when available).
+    const auto layer = net_layer_from_env();
+    bool layer_present = false;
+    for (uint32_t i = 0; i < num_layers; ++i)
+        layer_present = layer_present or layers[i] == layer;
+    EP_HOST_ASSERT(layer_present);
     for (int peer_rank_idx = 0; peer_rank_idx < num_ranks; ++ peer_rank_idx) {
         if (peer_rank_idx == rank_idx)
             continue;
