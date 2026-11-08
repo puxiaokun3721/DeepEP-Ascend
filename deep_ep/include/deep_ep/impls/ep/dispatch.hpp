@@ -18,6 +18,7 @@
 #include <deep_ep/common/math.hpp>
 #include <deep_ep/common/reduction.hpp>
 #include <deep_ep/common/simt.hpp>
+#include <deep_ep/diag/diag20.hpp>
 
 namespace deep_ep {
 
@@ -95,7 +96,8 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
     __gm__ int* dst_buffer_slot_idx, __gm__ int* dst_gsge_idx,
     const uint64_t recv_buffer_offset,
     const int num_hidden_bytes, const int num_metadata_bytes, const int num_token_bytes,
-    const int num_tokens, const int vec_core_idx, const int rank_idx) {
+    const int num_tokens, const int vec_core_idx, const int rank_idx,
+    __gm__ uint8_t* diag_arena, const int diag_mode, const int diag_call_id) {
     // Indices
     // TODO: try intrinsics
     // TODO: reshuffling, but also ensure coalescing
@@ -110,6 +112,13 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
     EP_STATIC_ASSERT(kNumRanks <= kNumThreads);
     EP_STATIC_ASSERT(kNumVecCores > 0);
     EP_STATIC_ASSERT(kNumTopk > 0 and kNumTopk <= warpSize);
+
+    // T020 diag: only the representative thread (0) owns an active SIMT writer.
+    diag20::SimtState dsimt;
+    dsimt.active = 0;
+    if (thread_idx == 0)
+        diag20::simt_init(&dsimt, diag_arena, diag_mode, static_cast<uint32_t>(diag_call_id),
+                          diag20::kOpDispatch, static_cast<uint32_t>(vec_core_idx), kNumVecCores);
 
     // Clean: < 1 us
     if (thread_idx == 0) {
@@ -128,6 +137,8 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
         ub_layout->sgep_to_entry[i] = -1;
 
     asc_syncthreads();
+    if (thread_idx == 0 and dsimt.active)
+        diag20::simt_point(&dsimt, 0x0220, uint64_t(num_tokens), uint64_t(vec_core_idx), 0, 0);
 
     // Each AIV owns a bounded contiguous token range, including the final partial range.
     if constexpr (kCachedMode) {
@@ -195,6 +206,9 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
             }
         }
         asc_syncthreads();
+        if (thread_idx == 0 and dsimt.active)
+            diag20::simt_point(&dsimt, 0x0221, uint64_t(ub_layout->lsqe_counter),
+                               uint64_t(ub_layout->rank_histogram[0]), uint64_t(kNumRanks), 0);
 
         // Create logical SQE range
         if (thread_idx < kNumRanks) {
@@ -253,6 +267,9 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
             *ptr = 0;
         }
         asc_syncthreads();
+        if (thread_idx == 0 and dsimt.active)
+            diag20::simt_point(&dsimt, 0x0222, uint64_t(ub_layout->lsqe_counter),
+                               uint64_t(ub_layout->rank_psum[0]), uint64_t(ub_layout->rank_psum[kNumRanks - 1]), 0);
 
         // Assign slots and create local copies' metadata
         // Also, create the global SGE to entry mapping
@@ -296,6 +313,9 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
     asc_syncthreads();
     if (thread_idx == 0)
         ub_layout->local_copy_ready = 1;
+    if (thread_idx == 0 and dsimt.active)
+        diag20::simt_point(&dsimt, 0x0223, uint64_t(ub_layout->lsqe_counter),
+                           uint64_t(ub_layout->local_copy_ready), 0, 0);
 
     // Load descriptors while the scalar pipeline copies local payloads.
     if (thread_idx < kNumRanks and thread_idx != rank_idx)
@@ -311,6 +331,10 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
     if (thread_idx == 0 and kNumRanks > 1 and
         static_cast<uint32_t>(ub_layout->jetty_info.packed_head) % kSQEBBAlignment != 0)
         __asc_simt_vf::__trap();
+    if (thread_idx == 0 and dsimt.active)
+        diag20::simt_point(&dsimt, 0x0224, uint64_t(ub_layout->jetty_info.packed_head),
+                           uint64_t(ub_layout->jetty_info.cq_depth),
+                           uint64_t(static_cast<uint32_t>(ub_layout->jetty_info.packed_head) & 0xFFFFFFFFULL), 0);
 
     if constexpr (not kCachedMode) {
         // scatter rank counts to remote ranks
@@ -323,12 +347,17 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
             *ptr = reduction::make_reduction_status(kNumVecCores, static_cast<int>(ub_layout->rank_psum[peer_idx]));
         }
     }
+    if (thread_idx == 0 and dsimt.active)
+        diag20::simt_point(&dsimt, 0x0225, uint64_t(ub_layout->rank_psum[0]),
+                           uint64_t(ub_layout->rank_psum[kNumRanks - 1]), 0, 0);
 
     // Write SQEs
     static constexpr int kNumWQEBBLanes = handle::kNumWQEBBBytes / sizeof(uint64_t);
     static constexpr int kNumWriteHeaderLanes = sizeof(AscendC::HcommUrmaSqeCtx) / sizeof(uint64_t);
     static constexpr int kNumSGEPairLanes = 2 * sizeof(AscendC::HcommUrmaSgeCtx) / sizeof(uint64_t);
     const int num_sqes = ub_layout->lsqe_counter;
+    if (thread_idx == 0 and dsimt.active)
+        diag20::simt_point(&dsimt, 0x0226, uint64_t(num_sqes), uint64_t(kNumWarps), 0, 0);
 
     const int num_sqes_per_warp = math::ceil_div(num_sqes, kNumWarps);
     const int start_lsqe_idx = warp_idx * num_sqes_per_warp;
@@ -428,9 +457,13 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
         // NOTES: if you do `syncthreads`, please make sure the `i` iteration count is same
     }
 
+    if (thread_idx == 0 and dsimt.active)
+        diag20::simt_point(&dsimt, 0x0227, uint64_t(num_sqes), uint64_t(ub_layout->psqe_counter), 0, 0);
     while (ub_layout->metadata_ready != 1)
         simt::nop<15>();
     asc_syncthreads();
+    if (thread_idx == 0 and dsimt.active)
+        diag20::simt_point(&dsimt, 0x0228, uint64_t(ub_layout->metadata_ready), 0, 0, 0);
     const auto num_iters = math::max(0, math::min(kNumMaxTokensPerVecCore, num_tokens - vec_core_idx * kNumMaxTokensPerVecCore));
     for (int i = warp_idx; i < num_iters; i += kNumWarps) {
         const auto dst_slot_idx = ub_layout->local_copy_dst_slot_idx[i];
@@ -444,9 +477,17 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
                 asc_stcg(dst + word_idx, src[word_idx]);
         }
     }
+    if (thread_idx == 0 and dsimt.active)
+        diag20::simt_point(&dsimt, 0x0229, uint64_t(num_iters), 0, 0, 0);
 
-    if constexpr (kCachedMode)
+    if constexpr (kCachedMode) {
+        if (thread_idx == 0)
+            diag20::simt_finish(&dsimt);
         return;
+    }
+
+    if (thread_idx == 0 and dsimt.active and vec_core_idx <= 1)
+        diag20::simt_point(&dsimt, 0x022A, uint64_t(vec_core_idx), uint64_t(num_sqes), 0, 0);
 
     // Expert reduction: wait for all vector cores, send to remote and clean reduction workspace
     if (vec_core_idx == 0 and thread_idx < kNumExperts) {
@@ -501,6 +542,8 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
         *workspace_layout.get_remote_rank_histogram_ptr(thread_idx) = 0;
     }
     asc_syncthreads();
+    if (thread_idx == 0 and dsimt.active and vec_core_idx <= 1)
+        diag20::simt_point(&dsimt, 0x022B, uint64_t(vec_core_idx), 0, 0, 0);
 
     // Create expert psum layout
     if (vec_core_idx == 0 and thread_idx < warpSize) {
@@ -546,6 +589,8 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumThreads) void simt_persistent_worke
             inclusive_psum += simt::exchange(inclusive_warp_psum, warpSize - 1);
         }
     }
+    if (thread_idx == 0)
+        diag20::simt_finish(&dsimt);
 }
 
 template <int kNumRanks, int kNumExperts, int kNumTopk,
@@ -569,7 +614,10 @@ __global__ __vector__ void dispatch_impl(
     const int rank_idx,
     const int num_tokens,
     const int sf_token_stride,
-    const int sf_hidden_stride) {
+    const int sf_hidden_stride,
+    __gm__ uint8_t* diag_arena,
+    const int diag_mode,
+    const int diag_call_id) {
     // TODO(HUAWEI): kernel launch & init SoC cost 1.9 us, which is slow
     AscendC::InitSocState();
 
@@ -610,6 +658,8 @@ __global__ __vector__ void dispatch_impl(
         EP_DEVICE_ASSERT(sf_token_stride > 0 and sf_hidden_stride > 0);
 
     const auto vec_core_idx = static_cast<int>(AscendC::GetBlockIdx());
+    auto ds_diag = diag20::scalar_init(diag_arena, diag_mode, static_cast<uint32_t>(diag_call_id),
+                                       diag20::kOpDispatch, diag20::kWriterScalar, kNumVecCores);
     const auto workspace_layout = layout::EPWorkspaceLayout(workspace);
     const auto host_workspace_layout = layout::EPWorkspaceLayout(host_workspace);
 
@@ -648,7 +698,12 @@ __global__ __vector__ void dispatch_impl(
     if (vec_core_idx == 0)
         asc_mark_stamp<PIPE_S>(kTraceBarrierBefore);
 #endif
-    comm::scalar::barrier<kNumRanks, kNumTimeoutCycles, false>(workspace_layout.get_common_signals(), vec_core_idx);
+    if (ds_diag.active)
+        ds_diag.point(0x0201, uint64_t(num_tokens), uint64_t(kNumRanks), uint64_t(kNumVecCores), 0);
+    comm::scalar::barrier<kNumRanks, kNumTimeoutCycles, false>(
+        workspace_layout.get_common_signals(), vec_core_idx, nullptr, &ds_diag);
+    if (ds_diag.active)
+        ds_diag.point(0x0202, uint64_t(num_tokens), 0, 0, 0);
 #if defined(ASCENDC_TRACE_ON)
     if (vec_core_idx == 0)
         asc_mark_stamp<PIPE_S>(kTraceBarrierAfter);
@@ -681,9 +736,14 @@ __global__ __vector__ void dispatch_impl(
             reinterpret_cast<uint64_t>(recv_buffer.base) - reinterpret_cast<uint64_t>(workspace),
             kNumHiddenBytes, static_cast<int>(token_layout.get_num_bytes(true)),
             static_cast<int>(token_layout.get_num_bytes()),
-            num_tokens, vec_core_idx, rank_idx
+            num_tokens, vec_core_idx, rank_idx,
+            diag_arena, diag_mode, diag_call_id
         );
     }
+    if (ds_diag.active)
+        ds_diag.point(0x0203, uint64_t(num_tokens), uint64_t(vec_core_idx),
+                      uint64_t(math::max(0, math::min(kNumMaxTokensPerVecCore,
+                                                      num_tokens - vec_core_idx * kNumMaxTokensPerVecCore))), 0);
 
     auto preload_metadata = [&](const int token_idx, const int stage_idx) __aicore__ {
         const auto ub_metadata = ub_metadata_buffer.get_token_buffer(stage_idx * kNumTokensPerMetadataMTE);
@@ -761,6 +821,9 @@ __global__ __vector__ void dispatch_impl(
     const auto num_metadata_batches = math::ceil_div(num_tokens_for_vec_core, kNumTokensPerMetadataMTE);
     const auto num_active_stages = math::min(num_metadata_batches, kNumMetadataMTEStages);
 
+    if (ds_diag.active)
+        ds_diag.point(0x0204, uint64_t(num_tokens_for_vec_core), uint64_t(num_metadata_batches),
+                      uint64_t(num_active_stages), uint64_t(kNumMetadataMTEStages));
     for (int stage_idx = 0; stage_idx < num_active_stages; ++ stage_idx)
         asc_sync_notify(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>(stage_idx));
     for (int stage_idx = 0; stage_idx < num_active_stages; ++ stage_idx)
@@ -794,15 +857,25 @@ __global__ __vector__ void dispatch_impl(
         if (next_batch_idx < num_metadata_batches)
             preload_metadata(vec_core_idx * kNumMaxTokensPerVecCore + next_batch_idx * kNumTokensPerMetadataMTE, stage_idx);
     }
+    if (ds_diag.active)
+        ds_diag.point(0x0205, uint64_t(num_metadata_batches), 0, 0, 0);
     for (int stage_idx = 0; stage_idx < num_active_stages; ++ stage_idx)
         asc_sync_wait(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>(stage_idx));
     asc_sync_notify(PIPE_MTE2, PIPE_S, EVENT_ID0);
     asc_sync_wait(PIPE_MTE2, PIPE_S, EVENT_ID0);
     ub_layout->metadata_ready = 1;
+    if (ds_diag.active)
+        ds_diag.point(0x0206, uint64_t(ub_layout->metadata_ready), 0, 0, 0);
 
+    if (ds_diag.active)
+        ds_diag.point(0x0207, uint64_t(ub_layout->local_copy_ready), 0, 0, 0);
     while (ub_layout->local_copy_ready != 1)
         asm volatile("nop");
+    if (ds_diag.active)
+        ds_diag.point(0x0208, uint64_t(ub_layout->local_copy_ready), 0, 0, 0);
 
+    if (ds_diag.active)
+        ds_diag.point(0x0209, uint64_t(num_tokens_for_vec_core), uint64_t(kNumHiddenMTEStages), 0, 0);
     for (int stage_idx = 0; stage_idx < kNumHiddenMTEStages; ++ stage_idx)
         asc_sync_notify(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>(stage_idx));
 
@@ -843,11 +916,17 @@ __global__ __vector__ void dispatch_impl(
         asc_sync_wait(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>(stage_idx));
     asc_sync_notify(PIPE_MTE2, PIPE_S, EVENT_ID0);
     asc_sync_wait(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    if (ds_diag.active)
+        ds_diag.point(0x020A, uint64_t(num_tokens_for_vec_core), 0, 0, 0);
 
     // Wait until SIMT finishes routing and count reduction
     // TODO: ring DB overlappingly
+    if (ds_diag.active)
+        ds_diag.point(0x020B, 0, 0, 0, 0);
     asc_sync_notify(PIPE_V, PIPE_S, EVENT_ID0);
     asc_sync_wait(PIPE_V, PIPE_S, EVENT_ID0);
+    if (ds_diag.active)
+        ds_diag.point(0x020C, uint64_t(ub_layout->lsqe_counter), 0, 0, 0);
     if constexpr (kNumRanks > 1)
         EP_DEVICE_ASSERT(kNumMaxSQEs * kNumWQEBBsPerSQESlot <= handle::kSQDepth);
     const auto num_sqes = ub_layout->lsqe_counter;
@@ -856,12 +935,21 @@ __global__ __vector__ void dispatch_impl(
         EP_DEVICE_ASSERT(static_cast<uint32_t>(ub_layout->jetty_info.packed_head) % kSQEBBAlignment == 0);
         jetty.ring_doorbell();
     }
+    if (ds_diag.active)
+        ds_diag.point(0x020D, uint64_t(num_sqes), uint64_t(ub_layout->jetty_info.packed_head),
+                      uint64_t(ub_layout->jetty_info.packed_head >> 32), 0);
 
     // benchmark only: wait for all urma traffic to measure URMA latency
-    if constexpr (kDoBarrier)
+    if constexpr (kDoBarrier) {
+        if (ds_diag.active)
+            ds_diag.point(0x020E, 0, 0, 0, 0);
         comm::scalar::barrier<
             kNumRanks, kNumTimeoutCycles, true, true, true, kNumVecCores, kNumJetties>(
-                workspace_layout.get_common_signals(), vec_core_idx, jetty_ptrs);
+                workspace_layout.get_common_signals(), vec_core_idx, jetty_ptrs, &ds_diag);
+        if (ds_diag.active)
+            ds_diag.point(0x020F, 0, 0, 0, 0);
+    }
+    ds_diag.finish();
 }
 
 }  // namespace deep_ep

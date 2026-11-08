@@ -3,6 +3,7 @@
 #include <deep_ep/comm/barrier.hpp>
 #include <deep_ep/common/compiled.hpp>
 #include <deep_ep/comm/handle.hpp>
+#include <deep_ep/diag/diag20.hpp>
 #include <deep_ep/impls/ep/combine_utils.hpp>
 #include <deep_ep/layout/ep/workspace.hpp>
 #include <deep_ep/common/bitset.hpp>
@@ -59,13 +60,26 @@ template <int kNumRanks, int kNumTopk, int kNumMaxTokensPerRank, int kNumVecCore
 __simt_vf__ __aicore__ __launch_bounds__(kNumTokensPerTask * warpSize) void load_meta_issue_wqe(
         __ubuf__ ub_layout_t* ub, __gm__ const int* src_metadata, __gm__ const bfloat16_t* x, __gm__ uint8_t* send_buffer, __gm__ uint8_t* combine_recv_buffer, __gm__ const uint32_t* topk_weights,
         const uint64_t combine_recv_buffer_offset, const CombineTask task, const uint32_t task_sqebb_idx,
-        const int stage_idx, const int rank_idx, const bool issue_wqe) {
+        const int stage_idx, const int rank_idx, const bool issue_wqe,
+        const int vec_core_idx, __gm__ uint8_t* diag_arena, const int diag_mode, const int diag_call_id,
+        const bool diag_first, const bool diag_last) {
     EP_STATIC_ASSERT(kNumTopk > 0 and kNumTopk <= warpSize);
 
     const auto thread_idx = static_cast<int>(threadIdx.x);
     const auto token_idx = thread_idx / warpSize;
     const auto lane_idx = thread_idx % warpSize;
     const auto valid_token = token_idx < task.num_tokens;
+
+    // T020 diag: first/last task envelope, thread 0 is the representative writer.
+    diag20::SimtState dcs;
+    dcs.active = 0;
+    if (thread_idx == 0 and (diag_first or diag_last))
+        diag20::simt_init(&dcs, diag_arena, diag_mode, static_cast<uint32_t>(diag_call_id),
+                          diag20::kOpCombine, static_cast<uint32_t>(vec_core_idx), kNumVecCores,
+                          diag_first ? diag20::kWriterSimt : diag20::kWriterSimtLast);
+    if (thread_idx == 0 and dcs.active)
+        diag20::simt_point(&dcs, diag_first ? 0x0320 : 0x0322, uint64_t(task.rank_idx),
+                           uint64_t(task.num_tokens), uint64_t(task_sqebb_idx), uint64_t(stage_idx));
     const auto gm_token_metadata = src_metadata + (task.rank_slot_idx + token_idx * kNumVecCores) * ub_layout_t::kNumMetadataElems;
     int slot_idx = -1, metadata_value = -1;
     // load metadata from GM to register
@@ -148,6 +162,12 @@ __simt_vf__ __aicore__ __launch_bounds__(kNumTokensPerTask * warpSize) void load
         }
         asc_stcg(gm_wqe + lane_idx, wqe_word);
     }
+    if (thread_idx == 0 and dcs.active) {
+        // Writer-local envelope: num_slots / first_slot_idx are thread 0's token-0 values.
+        diag20::simt_point(&dcs, diag_first ? 0x0321 : 0x0323, uint64_t(num_slots),
+                           uint64_t(first_slot_idx), static_cast<uint64_t>(issue_wqe), 0);
+        diag20::simt_finish(&dcs);
+    }
 }
 
 template <int kNumRanks>
@@ -165,7 +185,8 @@ template <int kNumRanks, int kNumTopk, int kHidden, int kNumMaxTokensPerRank, in
 __global__ __vector__ void combine_impl(__gm__ bfloat16_t* x, __gm__ float* topk_weights, __gm__ int* src_metadata,
                                         __gm__ int* psum_num_recv_tokens_per_rank, __gm__ uint8_t* combine_recv_buffer,
                                         __gm__ uint8_t* send_buffer, __gm__ void* workspace, __gm__ void* jetty_ptrs,
-                                        const int rank_idx) {
+                                        const int rank_idx,
+                                        __gm__ uint8_t* diag_arena, const int diag_mode, const int diag_call_id) {
     AscendC::InitSocState();
 
     constexpr auto kNumTokensPerTask = 8;
@@ -197,11 +218,18 @@ __global__ __vector__ void combine_impl(__gm__ bfloat16_t* x, __gm__ float* topk
     const auto vec_core_idx = static_cast<int>(AscendC::GetBlockIdx());
     const auto combine_recv_buffer_offset = reinterpret_cast<uint64_t>(combine_recv_buffer) - reinterpret_cast<uint64_t>(workspace);
     auto& signals = *static_cast<__gm__ layout::EPSignals*>(workspace);
+    auto cs_diag = diag20::scalar_init(diag_arena, diag_mode, static_cast<uint32_t>(diag_call_id),
+                                       diag20::kOpCombine, diag20::kWriterScalar, kNumVecCores);
 
     EP_STATIC_ASSERT(sizeof(UBLayout) <= kNumUbBytes, "Combine task stages and hidden ring exceed UB capacity");
     __ubuf__ UBLayout* ub = 0;
 
-    comm::scalar::barrier<kNumRanks, kNumTimeoutCycles, false>(signals.common_signals, vec_core_idx);
+    if (cs_diag.active)
+        cs_diag.point(0x0301, uint64_t(kNumRanks), uint64_t(kNumVecCores), uint64_t(rank_idx), 0);
+    comm::scalar::barrier<kNumRanks, kNumTimeoutCycles, false>(
+        signals.common_signals, vec_core_idx, nullptr, &cs_diag);
+    if (cs_diag.active)
+        cs_diag.point(0x0302, 0, 0, 0, 0);
 
     handle::HcommJetty jetty(&ub->jetty_info, nullptr, jetty_ptrs, vec_core_idx);
     if constexpr (kNumRanks > 1) {
@@ -210,6 +238,8 @@ __global__ __vector__ void combine_impl(__gm__ bfloat16_t* x, __gm__ float* topk
         asc_sync_notify(PIPE_V, PIPE_S, EVENT_ID0);
         asc_sync_wait(PIPE_V, PIPE_S, EVENT_ID0);
     }
+    if (cs_diag.active)
+        cs_diag.point(0x0303, uint64_t(kNumRanks), 0, 0, 0);
     Bitset<kNumRanks> active_ranks = {};
 
     int num_total_tasks = 0;
@@ -235,6 +265,9 @@ __global__ __vector__ void combine_impl(__gm__ bfloat16_t* x, __gm__ float* topk
             num_remote_tokens += num_iters;
         }
     }
+    if (cs_diag.active)
+        cs_diag.point(0x0304, uint64_t(num_total_tasks), uint64_t(num_remote_tasks),
+                      uint64_t(num_remote_tokens), 0);
 
     // Stagger the round-robin peer order across ranks and vector cores.
     int16_t next_rank_idx = (rank_idx + vec_core_idx + 1) % kNumRanks;
@@ -274,7 +307,9 @@ __global__ __vector__ void combine_impl(__gm__ bfloat16_t* x, __gm__ float* topk
                                                  kNumVecCores, kNumTokensPerTask, UBLayout, kHasTopkWeights>>(
             AscendC::Simt::Dim3(kNumTokensPerTask * warpSize, 1, 1),
             ub, src_metadata, x, send_buffer, combine_recv_buffer, topk_weight_u32,
-            combine_recv_buffer_offset, task, task_sqebb_idx, stage_idx, rank_idx, issue_wqe
+            combine_recv_buffer_offset, task, task_sqebb_idx, stage_idx, rank_idx, issue_wqe,
+            vec_core_idx, diag_arena, diag_mode, diag_call_id,
+            task_idx == 0, task_idx + 1 == num_total_tasks
         );
         asc_sync_notify(PIPE_V, PIPE_S, static_cast<event_t>(stage_idx));
         if (issue_wqe)
@@ -287,6 +322,8 @@ __global__ __vector__ void combine_impl(__gm__ bfloat16_t* x, __gm__ float* topk
         issue_load_meta_wqe(stage_idx, stage_idx);
     }
 
+    if (cs_diag.active)
+        cs_diag.point(0x0305, uint64_t(num_total_tasks), uint64_t(sq_head), 0, 0);
     int num_issued_remote_tasks = 0;
     uint8_t stage_idx = 0;
     for (int task_iter_idx = 0; task_iter_idx < num_total_tasks; ++ task_iter_idx) {
@@ -330,11 +367,14 @@ __global__ __vector__ void combine_impl(__gm__ bfloat16_t* x, __gm__ float* topk
             asc_sync_notify(PIPE_MTE3, PIPE_S, static_cast<event_t>(stage_idx));
             asc_sync_wait(PIPE_MTE3, PIPE_S, static_cast<event_t>(stage_idx));
             jetty.set_sq_head(current_sq_end);
-            jetty.ring_doorbell();
+            jetty.ring_doorbell(&cs_diag);
         }
 
         stage_idx = stage_idx + 1 == kNumStages ? 0 : stage_idx + 1;
     }
+    if (cs_diag.active)
+        cs_diag.point(0x0306, uint64_t(num_issued_remote_tasks), uint64_t(num_remote_tasks),
+                      uint64_t(next_remote_sqebb_idx), 0);
 
     asc_sync_notify(PIPE_MTE3, PIPE_S, EVENT_ID0);
     asc_sync_wait(PIPE_MTE3, PIPE_S, EVENT_ID0);
@@ -355,13 +395,22 @@ __global__ __vector__ void combine_impl(__gm__ bfloat16_t* x, __gm__ float* topk
                                       (nop_sqebb_idx & (handle::kSQDepth - 1))));
         }
         jetty.advance_sq(new_head - static_cast<uint32_t>(ub->jetty_info.packed_head));
-        jetty.ring_doorbell();
+        jetty.ring_doorbell(&cs_diag);
     }
+    if (cs_diag.active)
+        cs_diag.point(0x0307, uint64_t(num_remote_tasks), uint64_t(num_remote_tokens),
+                      uint64_t(ub->jetty_info.packed_head), 0);
 
-    if constexpr (kDoBarrier)
+    if constexpr (kDoBarrier) {
+        if (cs_diag.active)
+            cs_diag.point(0x0308, 0, 0, 0, 0);
         comm::scalar::barrier<
             kNumRanks, kNumTimeoutCycles, true, false, true, kNumVecCores, kNumVecCores>(
-                signals.common_signals, vec_core_idx, jetty_ptrs);
+                signals.common_signals, vec_core_idx, jetty_ptrs, &cs_diag);
+        if (cs_diag.active)
+            cs_diag.point(0x0309, 0, 0, 0, 0);
+    }
+    cs_diag.finish();
 }
 
 } // namespace deep_ep

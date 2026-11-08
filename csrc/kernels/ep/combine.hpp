@@ -30,13 +30,16 @@ static void* launch_combine(void* x,
                             const int& num_ub_bytes,
                             const int& num_vec_cores,
                             const int64_t& num_timeout_cycles,
-                            const bool& do_barrier = false) {
+                            const bool& do_barrier = false,
+                            void* diag_arena = nullptr,
+                            const int& diag_mode = 0,
+                            const int& diag_call_id = 0) {
     EP_HOST_ASSERT(num_vec_cores > 0);
     EP_HOST_ASSERT(num_ub_bytes > 0);
     EP_HOST_ASSERT(num_max_tokens_per_rank > 0);
 
     // Compile
-    const auto kernel = jit->compile("combine", std::format(R"(
+    const auto kernel = jit->compile("t020_diag_combine", std::format(R"(
 #include <deep_ep/impls/ep/combine.hpp>
 
 using namespace deep_ep;
@@ -58,7 +61,8 @@ static void __instantiate_kernel() {{
         send_buffer,
         workspace,
         jetty_ptrs,
-        rank_idx);
+        rank_idx,
+        diag_arena, diag_mode, diag_call_id);
     return buffer;
 }
 

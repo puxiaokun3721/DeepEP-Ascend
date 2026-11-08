@@ -96,7 +96,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("lb_prefetch_weights", &EPBuffer::lb_prefetch_weights)
         .def("lb_reduce_grads", &EPBuffer::lb_reduce_grads)
         .def("dispatch", &EPBuffer::dispatch)
-        .def("combine", &EPBuffer::combine);
+        .def("combine", &EPBuffer::combine)
+        // ### T020 PATCH: diag20 launch context (diagnostic build only)
+        .def("set_diag20", &EPBuffer::set_diag20,
+             py::arg("arena") = py::none(), py::arg("mode") = 0, py::arg("call_id") = 0);
 
     py::class_<PPBuffer, BufferBase>(m, "PPBuffer")
         .def(py::init<int, int, std::string, int64_t, int, bool, int, bool>())

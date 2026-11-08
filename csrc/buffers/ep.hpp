@@ -33,6 +33,27 @@ public:
     std::shared_ptr<comm::Context> context;
     torch::Tensor lb_storage;
 
+    // ### T020 PATCH START: sticky diag20 launch context (D build only)
+    void* diag_arena = nullptr;
+    int diag_mode = 0;
+    int diag_call_id = 0;
+
+    void set_diag20(const std::optional<torch::Tensor>& arena, const int64_t& mode, const int64_t& call_id) {
+        if (not arena.has_value()) {
+            diag_arena = nullptr;
+            diag_mode = 0;
+            diag_call_id = 0;
+            return;
+        }
+        EP_HOST_ASSERT(arena->is_contiguous());
+        EP_HOST_ASSERT(arena->scalar_type() == torch::kByte);
+        EP_HOST_ASSERT(arena->numel() > 0);
+        diag_arena = arena->data_ptr();
+        diag_mode = static_cast<int>(mode);
+        diag_call_id = static_cast<int>(call_id);
+    }
+    // ### T020 PATCH END
+
     EPBuffer(const int& rank_idx, const int& num_ranks, const std::string& hccl_group_name,
              const int64_t& num_buffer_bytes, const int64_t& num_lb_buffer_bytes,
              const bool& use_huge1g_page,
@@ -279,7 +300,8 @@ public:
                         num_ub_bytes,
                         num_used_vec_cores,
                         context->num_gpu_timeout_cycles,
-                        barrier_in_prologue);
+                        barrier_in_prologue,
+                        diag_arena, diag_mode, diag_call_id);
 
         // URMA still reads x and metadata_send_buffer after the issue kernel exits.
         // No NPU stream tracks that traffic; capture its sources until the epilogue queues the drain.
@@ -503,7 +525,8 @@ public:
             num_ub_bytes,
             num_used_vec_cores,
             context->num_gpu_timeout_cycles,
-            barrier_in_prologue
+            barrier_in_prologue,
+            diag_arena, diag_mode, diag_call_id
         );
 
         // URMA still reads x (direct sends) and send_buffer after the issue kernel exits.

@@ -7,6 +7,7 @@
 
 #ifdef __CCE__
 #include <deep_ep/comm/handle.hpp>
+#include <deep_ep/diag/diag20.hpp>
 
 #include <kernel_operator.h>
 #include <simt_api/device_functions.h>
@@ -114,29 +115,45 @@ template <int kNumRanks, int64_t kNumTimeoutCycles,
           int kNumVecCores = 1, int kNumJetties = 0>
 __aicore__ __forceinline__ void barrier(
     __gm__ layout::CommonSignals& signals, const int vec_core_idx,
-    __gm__ void* jetty_ptrs = nullptr) {
+    __gm__ void* jetty_ptrs = nullptr, diag20::ScalarState* diag = nullptr) {
     EP_STATIC_ASSERT(kNumRanks <= kNumMaxRanks);
+    const uint64_t diag_shape =
+        uint64_t(kFlushStores) | (uint64_t(kSyncAtStart) << 1) | (uint64_t(kSyncAtEnd) << 2) |
+        (uint64_t(kNumRanks) << 8) | (uint64_t(kNumVecCores) << 16) | (uint64_t(kNumJetties) << 32);
+    const bool diag_on = diag != nullptr and diag->active;
 
     // Wait for MTE3 stores before launching the SIMT signals
     if constexpr (kFlushStores) {
         asc_sync_notify(PIPE_MTE3, PIPE_V, EVENT_ID0);
         asc_sync_wait(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        if (diag_on)
+            diag->point(0x0101, diag_shape, 0, 0, 0);
     }
 
     if constexpr (kSyncAtStart)
         AscendC::SyncAll<true>();
+    if (diag_on)
+        diag->point(0x0102, diag_shape, uint64_t(vec_core_idx), 0, 0);
 
     if constexpr (kFlushStores and kNumRanks > 1 and kNumJetties > 0) {
         if (jetty_ptrs != nullptr) {
+            if (diag_on)
+                diag->point(0x0103, uint64_t(kNumJetties), uint64_t(vec_core_idx), 0, 0);
             // Distribute scalar jetty drains across all AIVs, then synchronize them.
+            uint64_t num_drained = 0;
             for (int jetty_idx = vec_core_idx; jetty_idx < kNumJetties; jetty_idx += kNumVecCores) {
                 handle::HcommJetty jetty(
                     reinterpret_cast<__ubuf__ handle::HcommJettyInfo*>(0),
                     nullptr,
                     jetty_ptrs, jetty_idx);
-                jetty.template drain<kNumTimeoutCycles>();
+                jetty.template drain<kNumTimeoutCycles>(diag);
+                ++ num_drained;
             }
+            if (diag_on)
+                diag->point(0x0104, num_drained, 0, 0, 0);
             AscendC::SyncAll<true>();
+            if (diag_on)
+                diag->point(0x0105, diag_shape, 0, 0, 0);
         }
     }
 
@@ -149,6 +166,8 @@ __aicore__ __forceinline__ void barrier(
         const auto phase = status & 1, sign = status >> 1;
         const auto delta = sign ? -1 : 1;
         const auto target = sign ? 0 : kNumRanks;
+        if (diag_on)
+            diag->point(0x0106, uint64_t(counter), uint64_t(status), uint64_t(target), 0);
 
         // Increment local counter
         AscendC::WriteGmByPassDCache(counter_ptr, counter + 1);
@@ -159,6 +178,8 @@ __aicore__ __forceinline__ void barrier(
             AscendC::Simt::Dim3(kNumRanks, 1, 1),
             &signals, phase, delta
         );
+        if (diag_on)
+            diag->point(0x0107, uint64_t(phase), uint64_t(delta), uint64_t(target), 0);
 
         // Spin-wait until local signal reaches target
         // TODO(HUAWEI): why even with `volatile`, the compiler cannot generate bypass automatically?
@@ -174,10 +195,17 @@ __aicore__ __forceinline__ void barrier(
             }
             return false;
         });
+        if (diag_on)
+            diag->point(0x0108, uint64_t(phase), uint64_t(target),
+                        uint64_t(AscendC::ReadGmByPassDCache(signal_ptr)), 0);
     }
 
+    if (diag_on)
+        diag->point(0x0109, diag_shape, 0, 0, 0);
     if constexpr (kSyncAtEnd)
         AscendC::SyncAll<true>();
+    if (diag_on)
+        diag->point(0x010A, diag_shape, 0, 0, 0);
 }
 
 }  // namespace scalar

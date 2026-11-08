@@ -12,6 +12,7 @@
 #include <deep_ep/common/compiled.hpp>
 #include <deep_ep/common/exception.hpp>
 #include <deep_ep/common/math.hpp>
+#include <deep_ep/diag/diag20.hpp>
 
 namespace deep_ep::handle {
 
@@ -212,7 +213,7 @@ struct HcommJetty {
     }
 
     template <int64_t kNumTimeoutCycles>
-    __aicore__ __forceinline__ void poll_cq_when_sq_overflow() {
+    __aicore__ __forceinline__ void poll_cq_when_sq_overflow(diag20::ScalarState* diag = nullptr) {
         // Trigger CQ polling before the completion ring reaches its wraparound threshold.
         static constexpr uint32_t kNumPollCQThreshold = 10;
         // Reclaim a bounded batch to free CQ slots without draining all in-flight writes.
@@ -224,7 +225,7 @@ struct HcommJetty {
         if ((num_completions + kNumPollCQThreshold) % jetty_info->cq_depth ==
             completion_tail % jetty_info->cq_depth) {
             poll_cq<kNumTimeoutCycles>(
-                math::min(completion_tail + kNumCQEsPerPoll, num_completions));
+                math::min(completion_tail + kNumCQEsPerPoll, num_completions), diag);
         }
     }
 
@@ -343,7 +344,11 @@ struct HcommJetty {
         jetty_info->packed_head = (jetty_info->packed_head & 0xFFFFFFFF00000000ULL) | new_head;
     }
 
-    __aicore__ __forceinline__ void ring_doorbell() {
+    __aicore__ __forceinline__ void ring_doorbell(diag20::ScalarState* diag = nullptr) {
+        if (diag != nullptr and diag->active)
+            diag->point(0x0110, jetty_info->packed_head,
+                        reinterpret_cast<uint64_t>(jetty_info->sq_head_addr),
+                        reinterpret_cast<uint64_t>(jetty_info->sq_doorbell_addr), 0);
         AscendC::WriteGmByPassDCache(
             reinterpret_cast<__gm__ uint64_t*>(jetty_info->sq_head_addr),
             jetty_info->packed_head);
@@ -352,18 +357,21 @@ struct HcommJetty {
             reinterpret_cast<__gm__ uint32_t*>(jetty_info->sq_doorbell_addr),
             static_cast<uint32_t>(jetty_info->packed_head));
         AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
+        if (diag != nullptr and diag->active)
+            diag->point(0x0111, jetty_info->packed_head, 0, 0, 0);
     }
 
     template <int64_t kNumTimeoutCycles, bool kWithNotify, bool kDoCommit>
     __aicore__ __forceinline__ void post_write(
             const HcommPeer& peer, __gm__ void* local_base,
             __gm__ void* dst_sym_ptr, __gm__ void* src_ptr, const uint64_t num_bytes,
-            __gm__ void* notify_sym_ptr = nullptr, const uint64_t notify_value = 0) {
+            __gm__ void* notify_sym_ptr = nullptr, const uint64_t notify_value = 0,
+            diag20::ScalarState* diag = nullptr) {
         const auto num_wqebbs = kWithNotify ? kNumWriteWithNotifyWQEBBs : kNumWriteWQEBBs;
         const auto current_head = static_cast<uint32_t>(jetty_info->packed_head);
 
         // Reclaim CQ entries and prepare the SQE
-        poll_cq_when_sq_overflow<kNumTimeoutCycles>();
+        poll_cq_when_sq_overflow<kNumTimeoutCycles>(diag);
         build_write_sqe<kWithNotify>(
             peer, local_base, dst_sym_ptr, src_ptr, num_bytes,
             current_head, notify_sym_ptr, notify_value);
@@ -372,36 +380,40 @@ struct HcommJetty {
         copy_sqe_to_sq(current_head, num_wqebbs);
         advance_sq(num_wqebbs);
         if constexpr (kDoCommit)
-            ring_doorbell();
+            ring_doorbell(diag);
     }
 
     template <int64_t kNumTimeoutCycles, bool kDoCommit = true>
     __aicore__ __forceinline__ void put(
             const HcommPeer& peer, __gm__ void* local_base,
             __gm__ void* dst_sym_ptr, __gm__ void* src_ptr,
-            const uint64_t num_bytes) {
+            const uint64_t num_bytes, diag20::ScalarState* diag = nullptr) {
         post_write<kNumTimeoutCycles, false, kDoCommit>(
-            peer, local_base, dst_sym_ptr, src_ptr, num_bytes);
+            peer, local_base, dst_sym_ptr, src_ptr, num_bytes, nullptr, 0, diag);
     }
 
     template <int64_t kNumTimeoutCycles>
     __aicore__ __forceinline__ void put_with_notify(
             const HcommPeer& peer, __gm__ void* local_base,
             __gm__ void* dst_sym_ptr, __gm__ void* src_ptr, const uint64_t num_bytes,
-            __gm__ void* notify_sym_ptr, const uint64_t notify_value) {
+            __gm__ void* notify_sym_ptr, const uint64_t notify_value,
+            diag20::ScalarState* diag = nullptr) {
         post_write<kNumTimeoutCycles, true, true>(
             peer, local_base, dst_sym_ptr, src_ptr, num_bytes,
-            notify_sym_ptr, notify_value);
+            notify_sym_ptr, notify_value, diag);
     }
 
     template <int64_t kNumTimeoutCycles>
-    __aicore__ __forceinline__ void poll_cq(const uint32_t expected_tail) {
+    __aicore__ __forceinline__ void poll_cq(const uint32_t expected_tail,
+                                            diag20::ScalarState* diag = nullptr) {
         static constexpr uint32_t kNumCQDoorbellBits = 24;
         static constexpr uint32_t kCQEOwnerBit = 2;
 
         // Poll expected completions
         auto current_tail = AscendC::ReadGmByPassDCache(
             reinterpret_cast<__gm__ uint32_t*>(jetty_info->cq_tail_addr));
+        if (diag != nullptr and diag->active)
+            diag->point(0x0112, uint64_t(expected_tail), uint64_t(current_tail), 0, 0);
         while (current_tail != expected_tail) {
             const auto cqe = reinterpret_cast<__gm__ uint32_t*>(
                 jetty_info->cq_base_addr +
@@ -445,11 +457,13 @@ struct HcommJetty {
             current_tail & ((1U << kNumCQDoorbellBits) - 1));
         AscendC::WriteGmByPassDCache(
             reinterpret_cast<__gm__ uint32_t*>(jetty_info->completion_tail_addr), current_tail);
+        if (diag != nullptr and diag->active)
+            diag->point(0x0113, uint64_t(expected_tail), uint64_t(current_tail), 0, 0);
     }
 
     template <int64_t kNumTimeoutCycles>
-    __aicore__ __forceinline__ void drain() {
-        poll_cq<kNumTimeoutCycles>(static_cast<uint32_t>(jetty_info->packed_head >> 32));
+    __aicore__ __forceinline__ void drain(diag20::ScalarState* diag = nullptr) {
+        poll_cq<kNumTimeoutCycles>(static_cast<uint32_t>(jetty_info->packed_head >> 32), diag);
     }
 };
 
