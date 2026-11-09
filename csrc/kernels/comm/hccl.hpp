@@ -41,6 +41,132 @@ static uint32_t net_layer_from_env() {
     return static_cast<uint32_t>(v);
 }
 
+
+// ### PATCH START: AFD channel/queue ABI dump (diagnostic build only)
+// ABI mirrors of hcomm ChannelEntity (CANN pto/comm/async/urma/urma_hccl_defs.hpp).
+// Plain integer fields are used deliberately so the host build needs no extra headers.
+typedef struct {
+    int32_t type;
+    union { struct { uint32_t tokenId; uint32_t tokenValue; } ub; uint8_t raws[24]; } memInfo;
+} AfdProtectionInfo;
+typedef struct {
+    int32_t type;
+    union { struct { uint64_t addr; uint64_t size; AfdProtectionInfo protectionInfo; } rma; uint8_t raws[56]; } bufferInfo;
+} AfdRegedBufferEntity;
+typedef struct {
+    int32_t type;
+    union {
+        struct {
+            uint64_t sqVa; uint64_t headAddr; uint64_t tailAddr; uint64_t dbVa;
+            uint32_t jfsID; uint32_t wqeSize; uint32_t sqDepth; uint32_t tpID;
+            uint8_t remoteEID[16];
+        } ubJfs;
+        uint8_t raws[120];
+    } contextInfo;
+} AfdSqContext;
+typedef struct {
+    int32_t type;
+    union {
+        struct {
+            uint64_t scqVa; uint64_t headAddr; uint64_t tailAddr; uint64_t dbVa;
+            uint32_t jfcID; uint32_t cqeSize; uint32_t cqDepth;
+        } ubJfc;
+        uint8_t raws[120];
+    } contextInfo;
+} AfdCqContext;
+typedef struct {
+    uint32_t abiHeader[4];
+    uint32_t engine; uint32_t protocol;
+    uint32_t localNotifyNum; uint32_t remoteNotifyNum;
+    uint32_t localBufferNum; uint32_t remoteBufferNum;
+    uint32_t sqNum; uint32_t cqNum;
+    void* localNotifyAddr; void* remoteNotifyAddr;
+    AfdRegedBufferEntity* localBufferAddr; AfdRegedBufferEntity* remoteBufferAddr;
+    AfdSqContext* sqContextAddr; AfdCqContext* cqContextAddr;
+    uint8_t reserve[160];
+} AfdChannelEntity;
+
+static_assert(__builtin_offsetof(AfdChannelEntity, remoteBufferAddr) == 72, "remoteBufferAddr offset");
+static_assert(__builtin_offsetof(AfdChannelEntity, sqContextAddr) == 80, "sqContextAddr offset");
+static_assert(__builtin_offsetof(AfdChannelEntity, cqContextAddr) == 88, "cqContextAddr offset");
+static_assert(sizeof(AfdChannelEntity) == 256, "ChannelEntity size");
+static_assert(sizeof(AfdRegedBufferEntity) == 64, "RegedBufferEntity size");
+
+static bool afd_dump_enabled() {
+    const char* e = std::getenv("AFD_L1_DUMP_CHAN");
+    return e != nullptr and e[0] != char(0) and e[0] != char('0');
+}
+
+static bool afd_read_dev(void* dst, const void* src, size_t bytes) {
+    if (src == nullptr) return false;
+    return aclrtMemcpy(dst, bytes, const_cast<void*>(src), bytes, ACL_MEMCPY_DEVICE_TO_HOST) == ACL_SUCCESS;
+}
+
+static void afd_dump_channel_entities(const std::vector<ChannelHandle>& handles, int rank_idx, const char* tag) {
+    if (not afd_dump_enabled()) return;
+    std::fprintf(stderr, "AFD_CHAN_ABI rank=%d tag=%s nchan=%zu size=%zu rbe=%zu sqc=%zu cqc=%zu\n",
+                 rank_idx, tag, handles.size(), sizeof(AfdChannelEntity),
+                 sizeof(AfdRegedBufferEntity), sizeof(AfdSqContext), sizeof(AfdCqContext));
+    for (size_t i = 0; i < handles.size(); ++ i) {
+        const auto h = handles[i];
+        AfdChannelEntity e{};
+        if (not afd_read_dev(&e, reinterpret_cast<const void*>(h), sizeof(e))) {
+            std::fprintf(stderr, "AFD_CHAN rank=%d tag=%s ch=%zu h=0x%llx READ_FAIL\n",
+                         rank_idx, tag, i, static_cast<unsigned long long>(h));
+            continue;
+        }
+        AfdRegedBufferEntity lb{}, rb{};
+        AfdSqContext sq{};
+        AfdCqContext cq{};
+        const bool ok_lb = e.localBufferNum > 0 && afd_read_dev(&lb, e.localBufferAddr, sizeof(lb));
+        const bool ok_rb = e.remoteBufferNum > 0 && afd_read_dev(&rb, e.remoteBufferAddr, sizeof(rb));
+        const bool ok_sq = e.sqNum > 0 && afd_read_dev(&sq, e.sqContextAddr, sizeof(sq));
+        const bool ok_cq = e.cqNum > 0 && afd_read_dev(&cq, e.cqContextAddr, sizeof(cq));
+        std::fprintf(stderr,
+            "AFD_CHAN rank=%d tag=%s ch=%zu h=0x%llx eng=%u proto=%u ln=%u rn=%u lbn=%u rbn=%u sqn=%u cqn=%u\n",
+            rank_idx, tag, i, static_cast<unsigned long long>(h),
+            e.engine, e.protocol, e.localNotifyNum, e.remoteNotifyNum,
+            e.localBufferNum, e.remoteBufferNum, e.sqNum, e.cqNum);
+        std::fprintf(stderr,
+            "AFD_CHAN_LBUF rank=%d ch=%zu ok=%d type=%d addr=0x%llx size=%llu tokid=%u tokval=%u\n",
+            rank_idx, i, ok_lb ? 1 : 0, lb.type,
+            static_cast<unsigned long long>(lb.bufferInfo.rma.addr),
+            static_cast<unsigned long long>(lb.bufferInfo.rma.size),
+            lb.bufferInfo.rma.protectionInfo.memInfo.ub.tokenId,
+            lb.bufferInfo.rma.protectionInfo.memInfo.ub.tokenValue);
+        std::fprintf(stderr,
+            "AFD_CHAN_RBUF rank=%d ch=%zu ok=%d type=%d addr=0x%llx size=%llu tokid=%u tokval=%u\n",
+            rank_idx, i, ok_rb ? 1 : 0, rb.type,
+            static_cast<unsigned long long>(rb.bufferInfo.rma.addr),
+            static_cast<unsigned long long>(rb.bufferInfo.rma.size),
+            rb.bufferInfo.rma.protectionInfo.memInfo.ub.tokenId,
+            rb.bufferInfo.rma.protectionInfo.memInfo.ub.tokenValue);
+        unsigned long long eid0 = 0, eid1 = 0;
+        std::memcpy(&eid0, &sq.contextInfo.ubJfs.remoteEID[0], 8);
+        std::memcpy(&eid1, &sq.contextInfo.ubJfs.remoteEID[8], 8);
+        std::fprintf(stderr,
+            "AFD_CHAN_SQ rank=%d ch=%zu ok=%d type=%d va=0x%llx head=0x%llx tail=0x%llx db=0x%llx jfsid=%u wqesize=%u sqdepth=%u tpid=%u eid0=0x%llx eid1=0x%llx\n",
+            rank_idx, i, ok_sq ? 1 : 0, sq.type,
+            static_cast<unsigned long long>(sq.contextInfo.ubJfs.sqVa),
+            static_cast<unsigned long long>(sq.contextInfo.ubJfs.headAddr),
+            static_cast<unsigned long long>(sq.contextInfo.ubJfs.tailAddr),
+            static_cast<unsigned long long>(sq.contextInfo.ubJfs.dbVa),
+            sq.contextInfo.ubJfs.jfsID, sq.contextInfo.ubJfs.wqeSize,
+            sq.contextInfo.ubJfs.sqDepth, sq.contextInfo.ubJfs.tpID, eid0, eid1);
+        std::fprintf(stderr,
+            "AFD_CHAN_CQ rank=%d ch=%zu ok=%d type=%d va=0x%llx head=0x%llx tail=0x%llx db=0x%llx jfcid=%u cqesize=%u cqdepth=%u\n",
+            rank_idx, i, ok_cq ? 1 : 0, cq.type,
+            static_cast<unsigned long long>(cq.contextInfo.ubJfc.scqVa),
+            static_cast<unsigned long long>(cq.contextInfo.ubJfc.headAddr),
+            static_cast<unsigned long long>(cq.contextInfo.ubJfc.tailAddr),
+            static_cast<unsigned long long>(cq.contextInfo.ubJfc.dbVa),
+            cq.contextInfo.ubJfc.jfcID, cq.contextInfo.ubJfc.cqeSize,
+            cq.contextInfo.ubJfc.cqDepth);
+    }
+    std::fflush(stderr);
+}
+// ### PATCH END: AFD channel/queue ABI dump
+
 struct HCCLContext {
     std::shared_ptr<symmetric::SymmetricMemory> memory;
     HcclComm comm = nullptr;
@@ -129,6 +255,21 @@ struct HCCLContext {
             for (uint32_t i = 0; i < num_layers; ++i)
                 has_layer = has_layer or layers[i] == transport_layer;
             EP_HOST_ASSERT(has_layer);
+
+            // ### PATCH START: layer1 receipt (host-only, values already obtained)
+            {
+                const char* l1_env_raw = std::getenv("EP_HCCL_NET_LAYER");
+                std::fprintf(stderr,
+                             "AFD_L1_RECEIPT ctor rank=%d num_ranks=%d jetties=%d group=%s env_raw=%s num_layers=%u chosen_layer=%u\n",
+                             rank_idx, num_ranks, num_jetties, hccl_group_name.c_str(),
+                             l1_env_raw == nullptr ? "<unset>" : l1_env_raw,
+                             num_layers, transport_layer);
+                for (uint32_t l1_i = 0; l1_i < num_layers; ++ l1_i)
+                    std::fprintf(stderr, "AFD_L1_RECEIPT layers rank=%d idx=%u layer=%u\n",
+                                 rank_idx, l1_i, layers[l1_i]);
+                std::fflush(stderr);
+            }
+            // ### PATCH END: layer1 receipt
 
             // Both transport paths use the checked layer ID; protocols remain unchanged.
             acquire_ubmem_channels(transport_layer);
@@ -238,6 +379,12 @@ private:
             [](auto proto) { return proto == COMM_PROTOCOL_UB_MEM; },
             "no UB_MEM link to peer on the chosen layer");
 
+        for (const auto& l1_desc: descs)
+            std::fprintf(stderr, "AFD_L1_RECEIPT ubmem rank=%d layer=%u peer=%d protocol=%d\n",
+                         rank_idx, layer, static_cast<int>(l1_desc.remoteRank),
+                         static_cast<int>(l1_desc.channelProtocol));
+        std::fflush(stderr);
+
         std::vector<ChannelHandle> channels(descs.size(), 0);
         HCCL_CHECK(HcclChannelAcquire(comm, CommEngine::COMM_ENGINE_AIV,
                                       descs.data(), static_cast<uint32_t>(descs.size()),
@@ -266,6 +413,15 @@ private:
         const auto peer_descs = build_peer_descs(layer,
             [](auto proto) { return proto == COMM_PROTOCOL_UBC_CTP; },
             "no UBC_CTP link to peer on the chosen layer");
+
+        for (const auto& l1_desc: peer_descs)
+            std::fprintf(stderr, "AFD_L1_RECEIPT jetty rank=%d layer=%u peer=%d protocol=%d local_proto=%d remote_proto=%d grouped_gate=%d\n",
+                         rank_idx, layer, static_cast<int>(l1_desc.remoteRank),
+                         static_cast<int>(l1_desc.channelProtocol),
+                         static_cast<int>(l1_desc.localEndpoint.protocol),
+                         static_cast<int>(l1_desc.remoteEndpoint.protocol),
+                         (afd_channel_groups and num_ranks > 2) ? 1 : 0);
+        std::fflush(stderr);
 
         // ### PATCH START: branch B endpoint-group channels (AFD private)
         // AFD-private opt-in. All AFD ranks in world>2 use the grouped table (uniform
@@ -391,6 +547,7 @@ private:
         ACL_CHECK(aclrtMemcpy(jetty_device_ptrs, num_table_bytes,
                               channel_handles.data(), num_table_bytes,
                               ACL_MEMCPY_HOST_TO_DEVICE));
+        afd_dump_channel_entities(channel_handles, rank_idx, "plain");
     }
 
     // ### PATCH START: branch B endpoint-group channels (AFD private)
@@ -524,6 +681,16 @@ private:
             group_of[p] = g;
         }
         const int num_groups = static_cast<int>(group_reps.size());
+        for (int l1_p = 0; l1_p < num_peers; ++ l1_p)
+            std::fprintf(stderr, "AFD_L1_RECEIPT grouped rank=%d peer=%d group=%d\n",
+                         rank_idx, static_cast<int>(peer_descs[l1_p].remoteRank), group_of[l1_p]);
+        for (int l1_g = 0; l1_g < num_groups; ++ l1_g)
+            std::fprintf(stderr, "AFD_L1_RECEIPT group rank=%d group=%d protocol=%d loc_type=%d\n",
+                         rank_idx, l1_g, static_cast<int>(group_reps[l1_g].protocol),
+                         static_cast<int>(group_reps[l1_g].loc.locType));
+        std::fprintf(stderr, "AFD_L1_RECEIPT grouped_summary rank=%d num_peers=%d num_groups=%d num_jetties=%d\n",
+                     rank_idx, num_peers, num_groups, num_jetties);
+        std::fflush(stderr);
         channel_stride = static_cast<uint32_t>(num_jetties);
         CommMem mem{};
         mem.type = COMM_MEM_TYPE_DEVICE;
@@ -603,6 +770,7 @@ private:
             ACL_CHECK(aclrtMemcpy(jetty_device_ptrs, num_table_bytes,
                                   channel_handles.data(), num_table_bytes,
                                   ACL_MEMCPY_HOST_TO_DEVICE));
+            afd_dump_channel_entities(channel_handles, rank_idx, "grouped");
         } catch (const std::exception& error) {
             const bool cleaned = cleanup_grouped_resources(created_channels, registered_mems, created_endpoints, config);
             if (!cleaned)
