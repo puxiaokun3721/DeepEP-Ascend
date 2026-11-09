@@ -529,15 +529,21 @@ private:
         mem.type = COMM_MEM_TYPE_DEVICE;
         mem.addr = buffer;
         mem.size = static_cast<uint64_t>(num_bytes);
-        jetty_endpoints.assign(size_t(num_groups) * num_jetties, 0);
-        jetty_mem_handles.assign(size_t(num_groups) * num_jetties, 0);
+        // L1FIX: one physical endpoint (SQ/CQ) per (peer, jetty). Peers whose
+        // local endpoint compares "effectively equal" (a single Clos group on
+        // layer1) would otherwise be handed the same physical queue; the CAM AIV
+        // kernels size WQE slots from a per-peer head snapshot and the device
+        // contract requires distinct queues per (peer, AIV). The group
+        // representative still supplies the descriptor for every peer.
+        jetty_endpoints.assign(size_t(num_peers) * num_jetties, 0);
+        jetty_mem_handles.assign(size_t(num_peers) * num_jetties, 0);
         HcommChannelConfig config = nullptr;
         size_t created_endpoints = 0, registered_mems = 0, created_channels = 0;
         try {
-            for (int g = 0; g < num_groups; ++ g) {
+            for (int p = 0; p < num_peers; ++ p) {
                 for (int i = 0; i < num_jetties; ++ i) {
-                    const size_t slot = size_t(g) * num_jetties + i;
-                    HCOMM_CHECK(HcommEndpointCreate(&group_reps[g], &jetty_endpoints[slot]));
+                    const size_t slot = size_t(p) * num_jetties + i;
+                    HCOMM_CHECK(HcommEndpointCreate(&group_reps[group_of[p]], &jetty_endpoints[slot]));
                     ++ created_endpoints;
                     HCOMM_CHECK(HcommMemReg(jetty_endpoints[slot], buffer_uid.c_str(), &mem, &jetty_mem_handles[slot]));
                     ++ registered_mems;
@@ -547,7 +553,7 @@ private:
             for (int p = 0; p < num_peers; ++ p) {
                 for (int i = 0; i < num_jetties; ++ i) {
                     uint32_t port = 0;
-                    HCOMM_CHECK(HcommEndpointGetListenPort(jetty_endpoints[size_t(group_of[p]) * num_jetties + i], &port));
+                    HCOMM_CHECK(HcommEndpointGetListenPort(jetty_endpoints[size_t(p) * num_jetties + i], &port));
                     EP_HOST_ASSERT(port > 0 and port <= std::numeric_limits<uint16_t>::max());
                     own_ports[size_t(p) * num_jetties + i] = static_cast<uint16_t>(port);
                 }
@@ -571,7 +577,7 @@ private:
                     HCOMM_CHECK(HcommChannelDescInit(&desc, 1));
                     desc.remoteEndpoint = peer_desc.remoteEndpoint;
                     desc.notifyNum = 3;
-                    desc.memHandles = &jetty_mem_handles[size_t(group_of[p]) * num_jetties + i];
+                    desc.memHandles = &jetty_mem_handles[size_t(p) * num_jetties + i];
                     desc.memHandleNum = 1;
                     desc.role = rank_idx < peer_rank_idx ? HCOMM_SOCKET_ROLE_SERVER : HCOMM_SOCKET_ROLE_CLIENT;
                     if (rank_idx < peer_rank_idx) {
@@ -583,7 +589,7 @@ private:
                     }
                     desc.channelName = channel_names[channel_idx].c_str();
                     HCOMM_CHECK(HcommChannelCreateWithConfig(
-                        jetty_endpoints[size_t(group_of[p]) * num_jetties + i], CommEngine::COMM_ENGINE_AIV,
+                        jetty_endpoints[size_t(p) * num_jetties + i], CommEngine::COMM_ENGINE_AIV,
                         &desc, 1, config, channel_handles.data() + channel_idx));
                     ++ created_channels;
                 }
