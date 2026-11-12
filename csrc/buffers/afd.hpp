@@ -14,6 +14,7 @@
 #include <deep_ep/layout/afd/active.hpp>
 #include <deep_ep/layout/afd/return.hpp>
 #include <deep_ep/layout/afd/scheduler.hpp>
+#include <deep_ep/layout/afd/ffn_transaction.hpp>
 #include "../utils/tensor.hpp"
 #include <torch_npu/csrc/aten/common/from_blob.h>
 #include "../kernels/comm/hccl.hpp"
@@ -32,6 +33,10 @@ class AFDBuffer {
     // ### PATCH START: receiver resources belong to the existing buffer owner
     int recv_rank=-1,recv_q=0,recv_q_alloc=0,recv_alignment=0,recv_tile=0;
     bool recv_prepared=false;
+    bool ffn_transaction=false, transaction_geometry_valid=false;
+    uint64_t transaction_group_row_bound=0;
+    int transaction_backend_max_rows=0;
+    torch::Tensor owned_ffn_poll;
     torch::Tensor owned_active,owned_execution,owned_recv_workspace,owned_recv_x,owned_recv_metadata;
     std::optional<torch::Tensor> owned_recv_sf;
     // F state persists across replay; A return scratch is independent of dispatchSend.
@@ -103,6 +108,17 @@ class AFDBuffer {
         EP_HOST_ASSERT(bytes<=uint64_t(std::numeric_limits<int64_t>::max()));
         return torch::empty({int64_t(bytes)},torch::TensorOptions().dtype(torch::kByte).device(TORCH_DEVICE_NPU));
     }
+    void record_transaction_geometry(const std::vector<std::array<uint32_t,6>>& lane_specs,
+                                     const std::vector<uint32_t>& layer_ids) {
+        std::map<uint32_t,uint64_t> capacity_by_phase;
+        for(const auto& lane:lane_specs)
+            capacity_by_phase[lane[4]]+=lane[5];
+        for(const auto& phase:capacity_by_phase)
+            transaction_group_row_bound=std::max(transaction_group_row_bound,phase.second);
+        const std::set<uint32_t> distinct_layers(layer_ids.begin(),layer_ids.end());
+        transaction_geometry_valid=distinct_layers.size()==layer_ids.size() &&
+            !distinct_layers.count(afd::kFfnMixedLayer) && capacity_by_phase.rbegin()->first<=1;
+    }
     static void zero_tensor(const torch::Tensor& tensor) {
         ACL_CHECK(aclrtMemset(tensor.data_ptr(),tensor.nbytes(),0,tensor.nbytes()));
     }
@@ -164,6 +180,7 @@ public:
             lanes.push_back({v[0],v[1],v[2],v[3],v[4],v[5],{0,0}});
             cmax=std::max(cmax,v[5]);max_slots=std::max(max_slots,v[1]+1);
         }
+        record_transaction_geometry(lane_specs,layer_ids);
         uint32_t tile=0;
         for(uint32_t t:{32u,64u,128u,256u}) {
             const uint64_t ub=2*align32(4*uint64_t(num_experts))+2*align32(4*uint64_t(n))+
@@ -320,6 +337,9 @@ public:
         c["recv_q"]=recv_q;
         c["recv_q_alloc"]=recv_q_alloc;
         c["recv_alignment"]=recv_alignment;
+        c["ffn_transaction"]=ffn_transaction?1:0;
+        c["ffn_group_row_bound"]=int64_t(transaction_group_row_bound);
+        c["ffn_backend_max_rows"]=transaction_backend_max_rows;
         c["recv_tile"]=recv_tile;
         c["combine_tile"]=combine_tile;
         c["combine_chunk"]=combine_chunk;
@@ -370,7 +390,7 @@ public:
         owned_scheduler_workspace=torch::Tensor();owned_completion=torch::Tensor();
         owned_psum=torch::Tensor();owned_counts=torch::Tensor();owned_combine_x=torch::Tensor();
         owned_combine_send_workspace=torch::Tensor();owned_combine_recv_workspace=torch::Tensor();owned_recv_status=torch::Tensor();
-        owned_combine_recv_progress=torch::Tensor();
+        owned_combine_recv_progress=torch::Tensor();owned_ffn_poll=torch::Tensor();
         afd_stage("payload_context_reset_begin", 0);
         payload_context.reset();
         afd_stage("payload_context_reset_end", 0);
@@ -417,6 +437,7 @@ public:
             for(int f=0;f<num_ranks;++f)addresses.push_back(address);
             cmax=std::max(cmax,v[5]);max_slots=std::max(max_slots,v[1]+1);num_src=std::max(num_src,v[0]+1);
         }
+        owner->record_transaction_geometry(lane_specs,layer_ids);
         auto& c=owner->config;c.abi_version=kAbiVersion;c.num_ranks=num_ranks;c.num_src_ranks=num_src;
         c.num_source_lanes=lanes.size();c.num_experts=num_experts;c.num_topk=num_topk;
         c.num_hidden_bytes=token.num_hidden_bytes;c.num_sf_packs=num_sf_packs;c.num_vec_cores=num_vec_cores;
@@ -449,10 +470,32 @@ public:
         return owner;
     }
     // Called once, outside capture. SF may be contiguous [Qalloc,S] or packed columns.
-    void prepare_recv(int q,int q_alloc,int expert_alignment,bool sf_column_major=false) {
+    void prepare_recv(int q,int q_alloc,int expert_alignment,bool sf_column_major=false,
+                      bool transaction=false,int backend_max_rows=0) {
         using namespace afd;
         EP_HOST_ASSERT(!closed && recv_rank>=0 && !recv_prepared);
         EP_HOST_ASSERT(q>0 && q_alloc>=q && expert_alignment>0 && q_alloc>=expert_alignment && (expert_alignment&(expert_alignment-1))==0);
+        if(transaction) {
+            // Match the current UMDK DR/CS launch domain for this opt-in path.
+            constexpr uint32_t cam_max_lanes=256,cam_max_layers=64,cam_max_hidden=8192;
+            // A token has at most one route to any given expert. All registered lanes
+            // in one phase can enter a transaction, so the largest phase sum bounds a group.
+            TORCH_CHECK(!fp8 && transaction_geometry_valid,
+                "FFN transaction requires CAM BF16, phases 0/1, and unique, non-sentinel layer IDs");
+            TORCH_CHECK(config.num_source_lanes<=cam_max_lanes && config.num_layers<=cam_max_layers &&
+                hidden<=int(cam_max_hidden),"FFN transaction exceeds the CAM lane, layer or hidden domain");
+            TORCH_CHECK(transaction_group_row_bound<=uint64_t(q),
+                "FFN transaction Q must cover the largest whole expert group: Q=",q,
+                ", conservative group bound=",transaction_group_row_bound);
+            const uint64_t aligned_bound=(transaction_group_row_bound+expert_alignment-1)/
+                expert_alignment*expert_alignment;
+            TORCH_CHECK(aligned_bound<=uint64_t(q_alloc),
+                "FFN transaction Q_alloc must cover the aligned whole expert group: Q_alloc=",q_alloc,
+                ", aligned bound=",aligned_bound);
+            TORCH_CHECK(backend_max_rows>0 && q_alloc<=backend_max_rows,
+                "FFN transaction Q_alloc exceeds or lacks a backend row limit: Q_alloc=",q_alloc,
+                ", backend_max_rows=",backend_max_rows);
+        }
         const TokenLayout token{config.num_hidden_bytes,uint64_t(config.num_sf_packs)*2,config.num_topk};
         EP_HOST_ASSERT(token.record_stride()<=INT_MAX);
         for(int t:{1,2,4,8,16}) {
@@ -464,20 +507,24 @@ public:
         const uint64_t l=config.num_source_lanes,r=config.num_experts/config.num_ranks;
         EP_HOST_ASSERT(l<=INT_MAX && config.num_layers<=INT_MAX && l*r<=UINT32_MAX);
         const uint64_t recv_scratch=dispatch_recv_workspace_bytes(config.num_vec_cores,l,r,q);
-        const uint64_t additional=checked_allocation_bytes({active_bytes(l,r),execution_bytes(l),recv_scratch,
+        EP_HOST_ASSERT(!transaction || uint64_t(config.num_layers)*r<=INT_MAX);
+        const uint64_t active_size=transaction?ffn_active_bytes(l,r,config.num_layers):active_bytes(l,r);
+        const uint64_t additional=checked_allocation_bytes({active_size,execution_bytes(l),recv_scratch,
             uint64_t(q_alloc)*(config.num_hidden_bytes+2*uint64_t(config.num_sf_packs)+16)});
         EP_HOST_ASSERT(known_allocation_bytes<=budget_bytes && additional<=budget_bytes-known_allocation_bytes);
         EP_HOST_ASSERT(transport_reserve_bytes<=budget_bytes-known_allocation_bytes-additional);
-        owned_active=byte_tensor(active_bytes(l,r));owned_execution=byte_tensor(execution_bytes(l));
+        owned_active=byte_tensor(active_size);owned_execution=byte_tensor(execution_bytes(l));
         owned_recv_workspace=byte_tensor(recv_scratch);
         zero_tensor(owned_active);zero_tensor(owned_execution);zero_tensor(owned_recv_workspace);
         AFDActive header{};header.entries_offset=active_entries_offset();header.members_offset=active_members_offset(l);header.segments_offset=active_segments_offset(l);
+        if(transaction) {header.reserved=kFfnTransactionMagic;header.layer_idx=kFfnMixedLayer;}
         ACL_CHECK(aclrtMemcpy(owned_active.data_ptr(),owned_active.nbytes(),&header,sizeof(header),ACL_MEMCPY_HOST_TO_DEVICE));
         auto options=torch::TensorOptions().device(TORCH_DEVICE_NPU);
         owned_recv_x=torch::empty({q_alloc,hidden},options.dtype(fp8?torch::kFloat8_e4m3fn:torch::kBFloat16));
         owned_recv_metadata=torch::empty({q_alloc,4},options.dtype(torch::kInt32));
         if(fp8)owned_recv_sf=torch::empty_strided({q_alloc,int64_t(config.num_sf_packs)},
             sf_column_major?std::vector<int64_t>{1,q_alloc}:std::vector<int64_t>{int64_t(config.num_sf_packs),1},options.dtype(torch::kInt16));
+        ffn_transaction=transaction;transaction_backend_max_rows=transaction?backend_max_rows:0;
         recv_q=q;recv_q_alloc=q_alloc;recv_alignment=expert_alignment;recv_prepared=true;known_allocation_bytes+=additional;
     }
     torch::Tensor active()const{return owned_active;}
@@ -491,6 +538,9 @@ public:
         using namespace afd;
         EP_HOST_ASSERT(!closed && recv_prepared && recv_rank>=0 && !ffn_prepared);
         const uint32_t l=config.num_source_lanes,r=config.num_experts/config.num_ranks;
+        constexpr uint64_t cam_max_completion_bytes=65536;
+        TORCH_CHECK(!ffn_transaction || completion_bytes(l,r)<=cam_max_completion_bytes,
+            "FFN transaction Completion exceeds the CAM 65536-byte limit");
         // Exact array-aligned arenas of the device families, including source-lane maps.
         const uint64_t send_ub=align32(48*uint64_t(config.num_src_ranks))+
             96*uint64_t(config.num_vec_cores)*uint64_t(config.num_src_ranks)+512+
@@ -498,7 +548,8 @@ public:
         EP_HOST_ASSERT(send_ub<=uint64_t(num_ub_bytes) && 256+5*align32(4*uint64_t(r))<=uint64_t(num_ub_bytes));
         const uint64_t scratch=recv_workspace_bytes(config.num_vec_cores);
         const uint64_t extra=checked_allocation_bytes({scheduler_workspace_bytes(l,r),completion_bytes(l,r),
-            8*uint64_t(r),uint64_t(recv_q_alloc)*hidden*2,scratch});
+            8*uint64_t(r),uint64_t(recv_q_alloc)*hidden*2,scratch,
+            ffn_transaction?16*uint64_t(l):0});
         EP_HOST_ASSERT(known_allocation_bytes<=budget_bytes && extra<=budget_bytes-known_allocation_bytes);
         EP_HOST_ASSERT(transport_reserve_bytes<=budget_bytes-known_allocation_bytes-extra);
         owned_scheduler_workspace=byte_tensor(scheduler_workspace_bytes(l,r));zero_tensor(owned_scheduler_workspace);
@@ -507,6 +558,7 @@ public:
         auto options=torch::TensorOptions().device(TORCH_DEVICE_NPU);
         owned_psum=torch::zeros({r},options.dtype(torch::kInt32));
         owned_counts=torch::zeros({r},options.dtype(torch::kInt32));
+        if(ffn_transaction)owned_ffn_poll=torch::empty({l,4},options.dtype(torch::kInt32));
         owned_combine_x=torch::empty({recv_q_alloc,hidden},options.dtype(torch::kBFloat16));
         if(!payload_context) {
             // Local scheduler fixture starts with no publication; populate fixture Ready afterwards.
@@ -581,7 +633,17 @@ public:
         check_owned(psum_num_recv_tokens_per_expert,owned_psum);check_owned(num_unaligned_recv_tokens_per_expert,owned_counts);
         afd::launch_ffn_scheduler(owned_payload.data_ptr(),context.data_ptr(),control_buffer.data_ptr(),workspace.data_ptr(),
             active.data_ptr(),execution_state.data_ptr(),completion.data_ptr(),owned_psum.data_ptr(),owned_counts.data_ptr(),
-            config,recv_rank,recv_q,recv_q_alloc,recv_alignment,scheduler_precheck,num_ub_bytes);
+            config,recv_rank,recv_q,recv_q_alloc,recv_alignment,scheduler_precheck,num_ub_bytes,ffn_transaction);
+    }
+    torch::Tensor ffnPoll() {
+        EP_HOST_ASSERT(!closed && ffn_prepared && ffn_transaction);
+        afd::launch_ffn_poll(owned_context.data_ptr(),owned_control.data_ptr(),owned_scheduler_workspace.data_ptr(),
+            owned_active.data_ptr(),owned_ffn_poll.data_ptr(),config,recv_rank,num_ub_bytes);
+        return owned_ffn_poll;
+    }
+    std::string compileFFNPollOnly() {
+        EP_HOST_ASSERT(!closed && ffn_prepared && ffn_transaction);
+        return afd::compile_ffn_poll_only(config);
     }
     // Enqueue after the device-gated GMM2 on the same stream. Does not execute or validate GMM.
     void computeReady() {
@@ -613,7 +675,7 @@ public:
     // ### PATCH START: pipeline prewarm compile-only entries
     std::string compileFFNSchedulerOnly() {
         EP_HOST_ASSERT(!closed && ffn_prepared);
-        return afd::compile_ffn_scheduler_only(config,recv_q,recv_q_alloc,recv_alignment,scheduler_precheck);
+        return afd::compile_ffn_scheduler_only(config,recv_q,recv_q_alloc,recv_alignment,scheduler_precheck,ffn_transaction);
     }
     std::string compileComputeReadyOnly() {
         EP_HOST_ASSERT(!closed && ffn_prepared);
@@ -634,6 +696,7 @@ public:
         const at::Tensor& active,at::Tensor& control_buffer,at::Tensor& execution_state,
         at::Tensor& workspace,at::Tensor& completion) {
         EP_HOST_ASSERT(!closed && ffn_prepared && payload_context && combine_registration);
+        TORCH_CHECK(!ffn_transaction,"FFN transaction CombineSend uses the UMDK CAM operator");
         check_owned(x,owned_combine_x);check_owned(src_metadata,owned_recv_metadata);check_owned(context,owned_context);
         check_owned(active,owned_active);check_owned(control_buffer,owned_control);check_owned(execution_state,owned_execution);
         check_owned(workspace,owned_combine_send_workspace);check_owned(completion,owned_completion);
@@ -685,6 +748,7 @@ public:
         at::Tensor& execution_state,at::Tensor& workspace,at::Tensor& recv_x,
         std::optional<at::Tensor>& recv_sf,at::Tensor& recv_src_metadata) {
         EP_HOST_ASSERT(!closed && recv_prepared && recv_rank>=0);
+        TORCH_CHECK(!ffn_transaction,"FFN transaction DispatchRecv uses the UMDK CAM operator");
         check_owned(buffer,owned_payload);check_owned(context,owned_context);check_owned(active,owned_active);
         check_owned(execution_state,owned_execution);check_owned(workspace,owned_recv_workspace);
         check_bytes(buffer,config.payload_bytes);check_bytes(context,config.context_bytes);

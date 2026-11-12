@@ -52,7 +52,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("dispatchSend",&AFDBuffer::dispatchSend)
         .def_static("create_local_receiver",&AFDBuffer::create_local_receiver)
         .def("prepare_recv",&AFDBuffer::prepare_recv,py::arg("q"),py::arg("q_alloc"),
-             py::arg("expert_alignment"),py::arg("sf_column_major")=false)
+             py::arg("expert_alignment"),py::arg("sf_column_major")=false,
+             py::arg("ffn_transaction")=false,py::arg("backend_max_rows")=0)
         .def_property_readonly("active",&AFDBuffer::active)
         .def_property_readonly("execution_state",&AFDBuffer::execution_state)
         .def_property_readonly("recv_workspace",&AFDBuffer::recv_workspace)
@@ -73,6 +74,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_property_readonly("recv_status",&AFDBuffer::recv_status)
         .def_property_readonly("combine_recv_progress",&AFDBuffer::combine_recv_progress)
         .def("ffnScheduler",&AFDBuffer::ffnScheduler)
+        .def("ffnPoll",&AFDBuffer::ffnPoll)
+        .def("compileFFNPollOnly",&AFDBuffer::compileFFNPollOnly)
         .def("computeReady",&AFDBuffer::computeReady)
         .def("probeQueueMeta",&AFDBuffer::probeQueueMeta)
         .def("compileQueueMetaProbeOnly",&AFDBuffer::compileQueueMetaProbeOnly)

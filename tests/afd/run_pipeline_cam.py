@@ -29,6 +29,7 @@ import torch_npu.profiler
 import deep_ep
 import umdk_cam_op_lib  # noqa: F401 - registers umdk_cam_op_lib torch ops
 from deep_ep.utils.envs import get_hccl_group_name
+from ffn_transaction_runner import run_transaction_ffn
 
 CAM = torch.ops.umdk_cam_op_lib
 
@@ -130,6 +131,14 @@ def main():
                              '"auto" = ceil(1.2 * num_sources * window * topk / num_receivers), '
                              'capped at 32768; an integer reproduces historical runs')
     parser.add_argument('--short-second', type=int)
+    parser.add_argument('--ffn-transaction', action='store_true', help='fixed selection and whole-expert slices')
+    parser.add_argument('--transaction-cohort', action='store_true',
+                        help='diagnostic: wait for all single-round lanes before the first selection')
+    parser.add_argument('--transaction-gmm', action='store_true', help='BF16 grouped GEMM diagnostic (H=128)')
+    parser.add_argument('--transaction-layers', type=int, choices=(1, 2), default=1)
+    parser.add_argument('--transaction-alignment', type=int, default=1)
+    parser.add_argument('--backend-max-rows', type=int, default=0,
+                        help='explicit padded-row capacity of the selected FFN backend')
     parser.add_argument('--precheck', action='store_true')
     parser.add_argument('--all-masked', action='store_true')
     parser.add_argument('--microbatches', type=int, choices=(1, 2, 3), default=1)
@@ -167,6 +176,15 @@ def main():
         parser.error('num-vec-cores must be nonnegative')
     if args.a_budget_mib <= 0 or args.f_budget_mib <= 0 or args.reserve_mib <= 0:
         parser.error('budgets and reserve must be positive')
+    if args.transaction_gmm and (not args.ffn_transaction or args.hidden != 128):
+        parser.error('--transaction-gmm requires --ffn-transaction and H=128')
+    if args.ffn_transaction and (args.backend_max_rows <= 0 or args.neg_qalign or
+            args.transaction_alignment <= 0 or args.transaction_alignment & (args.transaction_alignment - 1)):
+        parser.error('transaction mode requires a positive backend limit and power-of-two alignment')
+    if args.transaction_cohort and (not args.ffn_transaction or args.batch > args.window or args.microbatches != 1):
+        parser.error('--transaction-cohort requires one transaction-mode MB and a single communication round')
+    if not args.ffn_transaction and args.transaction_layers != 1:
+        parser.error('--transaction-layers=2 requires --ffn-transaction')
     torch.npu.set_device(int(os.environ['LOCAL_RANK']))
     dist.init_process_group('hccl', timeout=timedelta(seconds=args.timeout_seconds))
     rank, world = dist.get_rank(), dist.get_world_size()
@@ -174,6 +192,12 @@ def main():
         raise ValueError('2 ranks = one A/one F; 4 = two A/two F; 8 = four A/four F')
     num_sources = world // 2
     sources, receivers = list(range(num_sources)), list(range(num_sources, world))
+    if args.transaction_layers > num_sources:
+        parser.error('need at least two A ranks to exercise two layers')
+    dp_ids = ([src % args.transaction_layers for src in sources] if args.ffn_transaction else [0] * num_sources)
+    layer_ids = list(range(args.transaction_layers))
+    lane_specs = [[src, mb, dp_ids[src], src, 0, args.window]
+                  for src in sources for mb in range(args.microbatches)]
     lengths = [args.batch] * num_sources
     if num_sources == 2 and args.short_second is not None:
         lengths[1] = args.short_second
@@ -184,8 +208,13 @@ def main():
     # ceil(1.2 * that) leaves headroom for imbalance and keeps essentially
     # every round single-slice. The tiling domain caps q at 32768; batches
     # above the formula cap fall back to slicing instead of failing.
-    Q_MAX = 32768
-    if args.q == 'auto':
+    Q_MAX = args.backend_max_rows if args.ffn_transaction else 32768
+    group_bound = len(lane_specs) * args.window
+    if args.q == 'auto' and args.ffn_transaction:
+        q_mode = 'whole_expert_bound'
+        q_raw = q = group_bound
+        q_clamped = 0
+    elif args.q == 'auto':
         q_mode = 'auto'
         q_raw = -(-12 * num_sources * args.window * args.topk // (10 * len(receivers)))
         q = max(1, min(Q_MAX, q_raw))
@@ -198,7 +227,11 @@ def main():
             parser.error('--q must be "auto" or a positive integer')
         q_clamped = 0
         if not 1 <= q <= Q_MAX:
-            parser.error('explicit q must be in [1,32768]')
+            parser.error(f'explicit q must be in [1,{Q_MAX}]')
+    alignment = args.transaction_alignment if args.ffn_transaction else 1
+    qa = (q + alignment - 1) // alignment * alignment
+    if args.ffn_transaction and (q < group_bound or qa > Q_MAX):
+        parser.error(f'CAPACITY requires Q >= {group_bound} and Q_alloc={qa} <= backend={Q_MAX}')
     capacity, hidden, k = max(1, args.batch), args.hidden, args.topk
     experts = args.experts if args.experts else 2 * len(receivers)
     if experts > 512 or experts < k or experts % len(receivers):
@@ -232,7 +265,7 @@ def main():
             _payload += 2 * _align(4 * _nf, 32)
     _control = _align(_num_lanes * _nffn * 64, 32) if _role == 'A' else _align(_num_lanes * 128, 32)
     _ctx_base = (256 + _align(_num_lanes * 32, 32) + _align(_nffn * 32, 32)
-        + _align(_num_lanes * _nffn * 64, 32) + _align(1 * 4, 32))
+        + _align(_num_lanes * _nffn * 64, 32) + _align(len(layer_ids) * 4, 32))
     _ctx = _ctx_base + 32 + 32 * len(sources) + 32 * _num_lanes
     _c = args.window
     _slots = args.microbatches
@@ -251,10 +284,13 @@ def main():
         _active = 64 + 64 * _num_lanes + 32 * _num_lanes * _nf
         _execution = 32 + _align(4 * _num_lanes, 32)
         _drecv = 32 * _nvc + 256 + 2 * _align(4 * min(_num_lanes * _nf, q), 32)
-        _add = _active + _execution + _drecv + q * (2 * hidden + 16)
+        if args.ffn_transaction:
+            _active += 32 + 64 * _num_lanes + _align(4 * _num_lanes * _nf, 32)
+            _active += _align(4 * len(layer_ids) * _nf, 32) + 16 * _num_lanes
+        _add = _active + _execution + _drecv + qa * (2 * hidden + 16)
         _sched = 32 + 96 * _num_lanes + 2 * _align(4 * _num_lanes * _nf, 32)
         _compl = 32 + 64 * _num_lanes + _align(4 * _num_lanes * _nf, 32)
-        _prep = _add + _sched + _compl + 8 * _nf + q * hidden * 2 + (32 * _nvc + 256)
+        _prep = _add + _sched + _compl + 8 * _nf + qa * hidden * 2 + (32 * _nvc + 256)
     _required = _payload + _control + _ctx + _ws_upper + _ledger + 32 + _tables + _prep
     _B = max(1, args.batch)
     _caller = (args.microbatches * (2 * _B * hidden * 2 + _B * k * 8
@@ -325,7 +361,7 @@ def main():
 
     _mem('pg_ready')
     owner = deep_ep.AFDBuffer(rank, group_name, sources, receivers,
-        [[a, mb, 0, a, 0, args.window] for a in sources for mb in range(args.microbatches)], [0],
+        lane_specs, layer_ids,
         hidden, 0, k, experts, capacity, False, _nvc, 120, args.timeout_seconds,
         _budget, _reserve)
     _mem('constructed', owner)
@@ -404,13 +440,16 @@ def main():
             mask = mask_cpu.npu()
             # Task ABI word must match AFD kAbiVersion (context.hpp; 2 with the channel_stride layout).
             task = torch.from_numpy(np.frombuffer(struct.pack('<16I',
-                2, rank, mb, mb, 0, lengths[rank], rounds, *([0]*9)), dtype=np.uint8).copy()).npu()
+                2, rank, mb, mb, dp_ids[rank], lengths[rank], rounds, *([0]*9)), dtype=np.uint8).copy()).npu()
             source_tasks.append(SourceTask(x_cpu, mask_cpu, x, idx, weights, mask, task, torch.full_like(x, -7)))
         send_stream, recv_stream = torch.npu.Stream(), torch.npu.Stream()
         send_complete = torch.npu.Event()
         send_results = [torch.empty_like(owner.send_status) for _ in source_tasks]
     else:
-        owner.prepare_recv(q, q, 1)
+        if args.ffn_transaction:
+            owner.prepare_recv(q, qa, alignment, ffn_transaction=True, backend_max_rows=args.backend_max_rows)
+        else:
+            owner.prepare_recv(q, qa, alignment)
         # prepare_recv fixes recv_q/q_alloc/alignment/tile; refresh so the CAM
         # attrs carry the real values instead of the pre-prepare zero defaults.
         _cfg.update({key: int(value) for key, value in owner.camConfig().items()})
@@ -462,6 +501,8 @@ def main():
                 pass
             else:
                 owner.compileFFNSchedulerOnly()
+                if args.ffn_transaction:
+                    owner.compileFFNPollOnly()
                 owner.compileComputeReadyOnly()
         dist.barrier()
     torch.npu.synchronize()
@@ -529,7 +570,7 @@ def main():
         with torch.npu.stream(recv_stream):
             for mb, (source_task, result) in enumerate(zip(source_tasks, send_results)):
                 assert result.cpu().tolist()[:2] == [2, 0], f'dispatchSend failed for microbatch {mb}'
-                xf = source_task.x_cpu.to(torch.float32)
+                xf = (source_task.x_cpu * (dp_ids[rank] + 1)).to(torch.float32)
                 acc = torch.zeros_like(xf)
                 for wv in weight_vector(args.weights, k):
                     acc = acc + xf * wv  # FP32 fold in k order, one BF16 round at the end
@@ -562,6 +603,14 @@ def main():
                         print('DIAGRAW failed', repr(exc)[:400], flush=True)
                 assert torch.equal(actual[:b], expected[:b]), f'weighted return mismatch for microbatch {mb}'
                 assert torch.all(actual[b:] == -7), f'capacity tail modified for microbatch {mb}'
+    elif args.ffn_transaction:
+        run_transaction_ffn(
+            owner, _cfg, rank=rank, lane_specs=lane_specs, layer_ids=layer_ids,
+            expected_rounds=rounds * args.microbatches * len(set(dp_ids)), timeout=args.timeout_seconds,
+            recv=lambda: recv_dispatch(owner, _cfg, group_name, recv_sf),
+            send=lambda: send_combine(owner, _cfg, group_name, _jetty),
+            grouped_gemm=args.transaction_gmm, wait_first_cohort=args.transaction_cohort)
+        torch.npu.synchronize()
     else:
         finished = 0
         deadline = time.monotonic() + args.timeout_seconds

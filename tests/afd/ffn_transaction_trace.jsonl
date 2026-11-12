@@ -1,0 +1,29 @@
+{"event": "poll", "f_rank": 0, "ready": [], "pending": [], "partial": []}
+{"event": "poll", "f_rank": 0, "ready": [0], "pending": [], "partial": [{"round": {"dp": 0, "mb": 7, "layer": 12, "index": 0, "rounds": 1}, "phase": "D", "missing_members": [1]}]}
+{"event": "scheduler", "f_rank": 0, "result": "idle"}
+{"event": "poll", "f_rank": 0, "ready": [1, 2, 3], "pending": [0], "partial": []}
+{"event": "scheduler", "f_rank": 0, "result": "selected", "txn": 1, "phase": "D", "entries": [{"dp": 0, "mb": 7, "layer": 12, "index": 0, "rounds": 1}, {"dp": 1, "mb": 9, "layer": 13, "index": 1, "rounds": 3}]}
+{"event": "dispatch_recv", "f_rank": 0, "txn": 1, "slice": 0, "groups": [{"layer": 12, "expert": 0, "rows": 4, "padded": 4}, {"layer": 13, "expert": 0, "rows": 4, "padded": 4}, {"layer": 13, "expert": 1, "rows": 4, "padded": 4}], "rows": 12, "padded": 12}
+{"event": "gmm", "f_rank": 0, "txn": 1, "slice": 0, "groups": 3}
+{"event": "combine_send", "f_rank": 0, "txn": 1, "slice": 0, "committed": true}
+{"event": "done_consumed", "f_rank": 0, "txn": 1, "slice": 0, "round": {"dp": 0, "mb": 7, "layer": 12, "index": 0, "rounds": 1}, "lanes": [0, 1]}
+{"event": "poll", "f_rank": 0, "ready": [0, 1], "pending": [2, 3], "partial": []}
+{"event": "dispatch_recv", "f_rank": 0, "txn": 1, "slice": 1, "groups": [{"layer": 13, "expert": 2, "rows": 4, "padded": 4}], "rows": 4, "padded": 4}
+{"event": "gmm", "f_rank": 0, "txn": 1, "slice": 1, "groups": 1}
+{"event": "combine_send", "f_rank": 0, "txn": 1, "slice": 1, "committed": true}
+{"event": "done_consumed", "f_rank": 0, "txn": 1, "slice": 1, "round": {"dp": 1, "mb": 9, "layer": 13, "index": 1, "rounds": 3}, "lanes": [2]}
+{"event": "transaction_end", "f_rank": 0, "txn": 1}
+{"event": "scheduler", "f_rank": 0, "result": "selected", "txn": 2, "phase": "P", "entries": [{"dp": 2, "mb": 5, "layer": 12, "index": 0, "rounds": 1}]}
+{"event": "dispatch_recv", "f_rank": 0, "txn": 2, "slice": 0, "groups": [{"layer": 12, "expert": 0, "rows": 1, "padded": 4}], "rows": 1, "padded": 4}
+{"event": "gmm", "f_rank": 0, "txn": 2, "slice": 0, "groups": 1}
+{"event": "combine_send", "f_rank": 0, "txn": 2, "slice": 0, "committed": true}
+{"event": "done_consumed", "f_rank": 0, "txn": 2, "slice": 0, "round": {"dp": 2, "mb": 5, "layer": 12, "index": 0, "rounds": 1}, "lanes": [3]}
+{"event": "transaction_end", "f_rank": 0, "txn": 2}
+{"event": "poll", "f_rank": 0, "ready": [2], "pending": [0, 1], "partial": []}
+{"event": "scheduler", "f_rank": 0, "result": "selected", "txn": 3, "phase": "D", "entries": [{"dp": 0, "mb": 8, "layer": 12, "index": 0, "rounds": 1}, {"dp": 1, "mb": 9, "layer": 13, "index": 2, "rounds": 3}]}
+{"event": "dispatch_recv", "f_rank": 0, "txn": 3, "slice": 0, "groups": [{"layer": 12, "expert": 1, "rows": 1, "padded": 4}, {"layer": 13, "expert": 0, "rows": 1, "padded": 4}], "rows": 2, "padded": 8}
+{"event": "gmm", "f_rank": 0, "txn": 3, "slice": 0, "groups": 2}
+{"event": "combine_send", "f_rank": 0, "txn": 3, "slice": 0, "committed": true}
+{"event": "done_consumed", "f_rank": 0, "txn": 3, "slice": 0, "round": {"dp": 0, "mb": 8, "layer": 12, "index": 0, "rounds": 1}, "lanes": [0, 1]}
+{"event": "done_consumed", "f_rank": 0, "txn": 3, "slice": 0, "round": {"dp": 1, "mb": 9, "layer": 13, "index": 2, "rounds": 3}, "lanes": [2]}
+{"event": "transaction_end", "f_rank": 0, "txn": 3}
