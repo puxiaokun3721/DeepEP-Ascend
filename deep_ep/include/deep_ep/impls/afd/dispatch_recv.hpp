@@ -199,7 +199,8 @@ __global__ __vector__ void dispatch_copy_epilogue_impl(
         } else if(task.valid!=1 || (task.kind!=WORK && task.kind!=CONTROL)) error=BAD_TASK;
         else if(state.stage!=SELECTED || state.error_code!=OK || state.num_entries!=task.num_entries) error=STATE_ORDER;
         if(error==OK && task.kind!=NOP) {
-            if(context->abi_version!=kAbiVersion || context->num_ranks!=kNumRanks || context->num_experts!=kNumExperts ||
+            if(context->abi_version!=kAbiVersion || context->comm_round_mode!=kSharedCommRounds ||
+               context->num_ranks!=kNumRanks || context->num_experts!=kNumExperts ||
                context->num_topk!=kNumTopk || context->num_vec_cores!=kNumVecCores || context->num_hidden_bytes!=kNumHiddenBytes ||
                context->num_sf_packs!=kNumSFPacks || context->num_source_lanes!=kNumSourceLanes || context->num_layers!=kNumLayers ||
                context->context_bytes!=context_bytes || context->payload_bytes!=payload_bytes ||

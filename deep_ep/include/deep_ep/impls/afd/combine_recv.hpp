@@ -50,7 +50,8 @@ __global__ __vector__ void combine_recv_impl(
     if(vec_core_idx==0) {
         uint32_t code=OK;
         if(context->abi_version!=kAbiVersion || task.abi_version!=kAbiVersion || !context->reserved_address ||
-            context->return_progress_mode!=uint32_t(RoundStep?RETURN_ROUND_STEP:RETURN_TRANSACTION)) code=BAD_ABI;
+            context->return_progress_mode!=uint32_t(RoundStep?RETURN_ROUND_STEP:RETURN_TRANSACTION) ||
+            context->comm_round_mode>kLocalCommRounds || task.reserved[0]!=context->comm_round_mode) code=BAD_ABI;
         else if(lane_idx==context->num_source_lanes || task.src_rank_idx!=context->src_rank_idx ||
             task.num_tokens>context->num_token_capacity || !task.num_comm_rounds ||
             task.payload_slot_idx>=context->num_slots) code=BAD_TASK;
@@ -90,9 +91,13 @@ __global__ __vector__ void combine_recv_impl(
     auto return_lanes=reinterpret_cast<__gm__ const AFDReturnLane*>(ctx+directory->lanes_offset);
     const auto return_lane=recv_read(return_lanes+lane_idx);
     if(vec_core_idx==0) {
+        const uint64_t minimum = lane.capacity ?
+            (uint64_t(task.num_tokens) + lane.capacity - 1) / lane.capacity : 0;
+        const uint64_t local = minimum ? minimum : 1;
         if(directory->version!=1 || directory->return_stride<uint64_t(2)*H ||
             !lane.capacity || lane.capacity>kMaxLaneTokens ||
-            task.num_comm_rounds<(uint64_t(task.num_tokens)+lane.capacity-1)/lane.capacity ||
+            task.num_comm_rounds < minimum ||
+            (context->comm_round_mode == kLocalCommRounds && task.num_comm_rounds != local) ||
             return_lane.return_offset>context->payload_bytes ||
             uint64_t(lane.capacity)*K*directory->return_stride>context->payload_bytes-return_lane.return_offset)
             AscendC::WriteGmByPassDCache(error,uint32_t(CAPACITY));

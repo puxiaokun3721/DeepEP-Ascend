@@ -338,6 +338,7 @@ public:
         c["recv_q_alloc"]=recv_q_alloc;
         c["recv_alignment"]=recv_alignment;
         c["ffn_transaction"]=ffn_transaction?1:0;
+        c["comm_round_mode"]=config.comm_round_mode;
         c["ffn_group_row_bound"]=int64_t(transaction_group_row_bound);
         c["ffn_backend_max_rows"]=transaction_backend_max_rows;
         c["recv_tile"]=recv_tile;
@@ -469,12 +470,24 @@ public:
         zero_tensor(owner->owned_payload);zero_tensor(owner->owned_control);
         return owner;
     }
+    // Set before any preparation/launch, on every owner in the communication domain.
+    void enable_local_rounds() {
+        TORCH_CHECK(!closed && !recv_prepared && !combine_recv_prepared && !source_launched,
+            "Local communication rounds must be enabled before AFD preparation or launch");
+        const uint32_t mode = afd::kLocalCommRounds;
+        ACL_CHECK(aclrtMemcpy(static_cast<uint8_t*>(owned_context.data_ptr()) +
+                offsetof(afd::AFDContextLayout,comm_round_mode),
+            sizeof(mode), &mode, sizeof(mode), ACL_MEMCPY_HOST_TO_DEVICE));
+        config.comm_round_mode = mode;
+    }
     // Called once, outside capture. SF may be contiguous [Qalloc,S] or packed columns.
     void prepare_recv(int q,int q_alloc,int expert_alignment,bool sf_column_major=false,
                       bool transaction=false,int backend_max_rows=0) {
         using namespace afd;
         EP_HOST_ASSERT(!closed && recv_rank>=0 && !recv_prepared);
         EP_HOST_ASSERT(q>0 && q_alloc>=q && expert_alignment>0 && q_alloc>=expert_alignment && (expert_alignment&(expert_alignment-1))==0);
+        TORCH_CHECK(transaction || config.comm_round_mode == kSharedCommRounds,
+            "Local communication rounds require the FFN transaction path");
         if(transaction) {
             // Match the current UMDK DR/CS launch domain for this opt-in path.
             constexpr uint32_t cam_max_lanes=256,cam_max_layers=64,cam_max_hidden=8192;
@@ -547,12 +560,14 @@ public:
             32*uint64_t(combine_tile)+2*align32(4*uint64_t(l))+256;
         EP_HOST_ASSERT(send_ub<=uint64_t(num_ub_bytes) && 256+5*align32(4*uint64_t(r))<=uint64_t(num_ub_bytes));
         const uint64_t scratch=recv_workspace_bytes(config.num_vec_cores);
-        const uint64_t extra=checked_allocation_bytes({scheduler_workspace_bytes(l,r),completion_bytes(l,r),
+        const uint64_t scheduler_bytes = config.comm_round_mode == kLocalCommRounds ?
+            scheduler_local_round_workspace_bytes(l,r) : scheduler_workspace_bytes(l,r);
+        const uint64_t extra=checked_allocation_bytes({scheduler_bytes,completion_bytes(l,r),
             8*uint64_t(r),uint64_t(recv_q_alloc)*hidden*2,scratch,
             ffn_transaction?16*uint64_t(l):0});
         EP_HOST_ASSERT(known_allocation_bytes<=budget_bytes && extra<=budget_bytes-known_allocation_bytes);
         EP_HOST_ASSERT(transport_reserve_bytes<=budget_bytes-known_allocation_bytes-extra);
-        owned_scheduler_workspace=byte_tensor(scheduler_workspace_bytes(l,r));zero_tensor(owned_scheduler_workspace);
+        owned_scheduler_workspace=byte_tensor(scheduler_bytes);zero_tensor(owned_scheduler_workspace);
         owned_completion=byte_tensor(completion_bytes(l,r));zero_tensor(owned_completion);
         owned_combine_send_workspace=byte_tensor(scratch);zero_tensor(owned_combine_send_workspace);
         auto options=torch::TensorOptions().device(TORCH_DEVICE_NPU);
@@ -641,9 +656,22 @@ public:
             owned_active.data_ptr(),owned_ffn_poll.data_ptr(),config,recv_rank,num_ub_bytes);
         return owned_ffn_poll;
     }
-    std::string compileFFNPollOnly() {
+    torch::Tensor ffnPollTimestamp(at::Tensor &timestamps) {
         EP_HOST_ASSERT(!closed && ffn_prepared && ffn_transaction);
-        return afd::compile_ffn_poll_only(config);
+        check_bytes(timestamps, uint64_t(config.num_source_lanes) * afd::kPollTimestampBytes);
+        EP_HOST_ASSERT(timestamps.storage_offset() == 0 && timestamps.device() == owned_context.device());
+        for (const auto *owner : {&owned_context, &owned_control, &owned_scheduler_workspace,
+                                  &owned_active, &owned_ffn_poll}) {
+            EP_HOST_ASSERT(!timestamps.is_alias_of(*owner));
+        }
+        afd::launch_ffn_poll_timestamp(owned_context.data_ptr(), owned_control.data_ptr(),
+            owned_scheduler_workspace.data_ptr(), owned_active.data_ptr(), owned_ffn_poll.data_ptr(),
+            timestamps.data_ptr(), config, recv_rank, num_ub_bytes);
+        return owned_ffn_poll;
+    }
+    std::string compileFFNPollOnly(bool timestamp = false) {
+        EP_HOST_ASSERT(!closed && ffn_prepared && ffn_transaction);
+        return afd::compile_ffn_poll_only(config, timestamp);
     }
     // Enqueue after the device-gated GMM2 on the same stream. Does not execute or validate GMM.
     void computeReady() {

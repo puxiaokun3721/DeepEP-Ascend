@@ -120,7 +120,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--batch', type=int, default=41)
     parser.add_argument('--window', type=int, default=16)
-    parser.add_argument('--hidden', type=int, default=128,
+    parser.add_argument('--hidden', type=int, default=7168,
                         help='BF16 hidden size (elements); matrix cases use 7168')
     parser.add_argument('--topk', type=int, default=2,
                         help='routed experts per token; matrix cases use 1/2/4/6/8')
@@ -134,7 +134,12 @@ def main():
     parser.add_argument('--ffn-transaction', action='store_true', help='fixed selection and whole-expert slices')
     parser.add_argument('--transaction-cohort', action='store_true',
                         help='diagnostic: wait for all single-round lanes before the first selection')
-    parser.add_argument('--transaction-gmm', action='store_true', help='BF16 grouped GEMM diagnostic (H=128)')
+    parser.add_argument('--transaction-gmm', action='store_true', help='BF16 grouped GEMM diagnostic')
+    parser.add_argument('--local-comm-rounds', action='store_true',
+                        help='each Attention member publishes its own final communication round')
+    parser.add_argument('--poll-cycles', action='store_true', help='record first Ready system cycles')
+    parser.add_argument('--reuse-short-slot', action='store_true',
+                        help='two Attention batches reuse one slot while the long member still has a tail')
     parser.add_argument('--transaction-layers', type=int, choices=(1, 2), default=1)
     parser.add_argument('--transaction-alignment', type=int, default=1)
     parser.add_argument('--backend-max-rows', type=int, default=0,
@@ -170,14 +175,16 @@ def main():
         parser.error('short-second must be within [0,batch]')
     if args.timeout_seconds <= 0 or args.max_sweeps <= 0:
         parser.error('timeout-seconds and max-sweeps must be positive')
-    if args.microbatches > 1 and args.batch > args.window and not args.round_step:
+    if args.microbatches > 1 and args.batch > args.window and not args.round_step and not args.reuse_short_slot:
         parser.error('multiple slots with multiple rounds require --round-step')
     if args.num_vec_cores < 0:
         parser.error('num-vec-cores must be nonnegative')
     if args.a_budget_mib <= 0 or args.f_budget_mib <= 0 or args.reserve_mib <= 0:
         parser.error('budgets and reserve must be positive')
-    if args.transaction_gmm and (not args.ffn_transaction or args.hidden != 128):
-        parser.error('--transaction-gmm requires --ffn-transaction and H=128')
+    if (args.transaction_gmm or args.local_comm_rounds or args.poll_cycles) and not args.ffn_transaction:
+        parser.error('GMM, local communication rounds and Poll cycles require --ffn-transaction')
+    if (args.local_comm_rounds or args.poll_cycles) and args.hidden != 7168:
+        parser.error('local communication rounds and Poll cycle validation require H=7168')
     if args.ffn_transaction and (args.backend_max_rows <= 0 or args.neg_qalign or
             args.transaction_alignment <= 0 or args.transaction_alignment & (args.transaction_alignment - 1)):
         parser.error('transaction mode requires a positive backend limit and power-of-two alignment')
@@ -196,12 +203,21 @@ def main():
         parser.error('need at least two A ranks to exercise two layers')
     dp_ids = ([src % args.transaction_layers for src in sources] if args.ffn_transaction else [0] * num_sources)
     layer_ids = list(range(args.transaction_layers))
-    lane_specs = [[src, mb, dp_ids[src], src, 0, args.window]
-                  for src in sources for mb in range(args.microbatches)]
+    if args.reuse_short_slot and (len(sources) != 2 or args.transaction_layers != 1 or
+            args.microbatches != 2 or not args.local_comm_rounds or not args.poll_cycles or
+            args.batch <= args.window or args.short_second is None or args.short_second > args.window):
+        parser.error('--reuse-short-slot requires 2A2F, one layer, two microbatches, local rounds, '
+                     'Poll cycles and a long source paired with a short one')
+    registered_slots = 1 if args.reuse_short_slot else args.microbatches
+    lane_specs = [[src, slot, dp_ids[src], src, 0, args.window]
+                  for src in sources for slot in range(registered_slots)]
     lengths = [args.batch] * num_sources
     if num_sources == 2 and args.short_second is not None:
         lengths[1] = args.short_second
-    rounds = max(1, max((b+args.window-1)//args.window for b in lengths))
+    local_rounds = [max(1, (length + args.window - 1) // args.window) for length in lengths]
+    rounds = max(local_rounds)
+    rounds_by_dp = [max(local_rounds[src] for src in sources if dp_ids[src] == dp) for dp in set(dp_ids)]
+    expected_ffn_rounds = sum(rounds_by_dp) if args.local_comm_rounds else rounds * len(rounds_by_dp)
     # Second-layer split capacity q (max expanded rows = (token, local expert)
     # routes per scheduler slice). A balanced round puts at most
     # num_sources * window * topk / num_receivers rows on one F rank, so
@@ -248,7 +264,7 @@ def main():
     if _nvc <= 0:
         parser.error('--num-vec-cores resolved to 0')
     _lanes = 0
-    _num_lanes = len(sources) * args.microbatches
+    _num_lanes = len(lane_specs)
     _R = _align(2 * hidden, 512)
     _record_stride = _align(hidden * 2 + 0 + _align(8 * k, 32) + 4 * k + 4 + 4, 512)
     _nf = max(1, experts // len(receivers))
@@ -256,7 +272,7 @@ def main():
     # metadata_stride: align32(align32(8K)+4K+4+4); record_stride already computed.
     _mstride = _align(_align(8 * k, 32) + 4 * k + 8, 32)
     if _role == 'A':
-        _payload = args.microbatches * _align(args.window * k * _R, 512)
+        _payload = registered_slots * _align(args.window * k * _R, 512)
     else:
         _payload = 0
         for _ in range(_num_lanes):
@@ -268,7 +284,7 @@ def main():
         + _align(_num_lanes * _nffn * 64, 32) + _align(len(layer_ids) * 4, 32))
     _ctx = _ctx_base + 32 + 32 * len(sources) + 32 * _num_lanes
     _c = args.window
-    _slots = args.microbatches
+    _slots = registered_slots
     _j = (_c + 31) // 32
     _ws_upper = (_align(4 * _c * k, 32) + _align(_c * _mstride, 32)
         + 2 * _align(4 * _j * (_nffn + experts), 32) + _align(4 * _c * k, 32)
@@ -289,6 +305,10 @@ def main():
             _active += _align(4 * len(layer_ids) * _nf, 32) + 16 * _num_lanes
         _add = _active + _execution + _drecv + qa * (2 * hidden + 16)
         _sched = 32 + 96 * _num_lanes + 2 * _align(4 * _num_lanes * _nf, 32)
+        if args.local_comm_rounds:
+            _sched += _num_lanes * (32 + _align(4 * _num_lanes, 32))
+        if args.poll_cycles:
+            _sched += 64 * _num_lanes
         _compl = 32 + 64 * _num_lanes + _align(4 * _num_lanes * _nf, 32)
         _prep = _add + _sched + _compl + 8 * _nf + qa * hidden * 2 + (32 * _nvc + 256)
     _required = _payload + _control + _ctx + _ws_upper + _ledger + 32 + _tables + _prep
@@ -337,6 +357,8 @@ def main():
     print('RUNCFG ' + json.dumps({'rank': rank, 'argv': sys.argv, 'run_tag': args.run_tag,
         'B': args.batch,
         'C': args.window, 'rounds': rounds, 'Q': q, 'Q_mode': q_mode,
+        'local_comm_rounds': args.local_comm_rounds, 'local_round_counts': local_rounds,
+        'expected_ffn_rounds': expected_ffn_rounds, 'poll_cycles': args.poll_cycles,
         'Q_raw': q_raw if q_mode == 'auto' else q, 'Q_clamped': q_clamped,
         'MB': args.microbatches,
         'weights': args.weights, 'routes': args.routes, 'so': _so_desc,
@@ -364,6 +386,8 @@ def main():
         lane_specs, layer_ids,
         hidden, 0, k, experts, capacity, False, _nvc, 120, args.timeout_seconds,
         _budget, _reserve)
+    if args.local_comm_rounds:
+        owner.enable_local_rounds()
     _mem('constructed', owner)
     # Launch parameters come from the owner itself; only num_hidden is derived
     # (camConfig reports the bf16 byte width, CAM attrs take elements).
@@ -386,7 +410,7 @@ def main():
             else:
                 _spso = _loff = _stride = _ver = None
             _a_payload = int(owner.payload.numel() * owner.payload.element_size()) if _role == 'A' else None
-            _expect = (args.microbatches * args.window * k * _stride) if (_role == 'A' and _stride) else None
+            _expect = (registered_slots * args.window * k * _stride) if (_role == 'A' and _stride) else None
             _match = (int(_a_payload == _expect) if (_role == 'A' and _stride) else None)
             print('STRIDEDIR ' + json.dumps({'tag': tag, 'rank': rank, 'role': _role,
                 'abi_version': _abi, 'abi_ok': int(_abi == 2),
@@ -395,7 +419,7 @@ def main():
                 'stride_ok': (int(_stride == _exp_stride) if _stride is not None else None),
                 'dir_version': _ver, 'version_ok': (int(_ver == 1) if _ver is not None else None),
                 'source_peers_offset': _spso, 'lanes_offset': _loff,
-                'a_payload_nbytes': _a_payload, 'a_expected_mb_c_k_stride': _expect,
+                'a_payload_nbytes': _a_payload, 'a_expected_slots_c_k_stride': _expect,
                 'a_payload_matches_expected': _match,
                 'f_layout_unchanged': True if _role == 'F' else None}), flush=True)
         except Exception as _exc:
@@ -418,7 +442,11 @@ def main():
         source_tasks = []
         for mb in range(args.microbatches):
             # Different, exactly representable BF16 data detects cross-slot output confusion.
-            x_cpu = ((torch.arange(capacity*hidden).reshape(capacity, hidden) + 3*mb + rank) % 17).to(torch.bfloat16)
+            x_cpu = torch.empty((capacity, hidden), dtype=torch.bfloat16)
+            for begin in range(0, capacity, 512):
+                end = min(begin + 512, capacity)
+                indices = torch.arange(begin * hidden, end * hidden, dtype=torch.int32)
+                x_cpu[begin:end] = ((indices.reshape(end - begin, hidden) + 3 * mb + rank) % 17)
             x = x_cpu.npu()
             # k adjacent ids per group: k=2 reproduces the validated identity pairs,
             # and cycling groups still spreads the batch over every F rank.
@@ -440,7 +468,9 @@ def main():
             mask = mask_cpu.npu()
             # Task ABI word must match AFD kAbiVersion (context.hpp; 2 with the channel_stride layout).
             task = torch.from_numpy(np.frombuffer(struct.pack('<16I',
-                2, rank, mb, mb, dp_ids[rank], lengths[rank], rounds, *([0]*9)), dtype=np.uint8).copy()).npu()
+                2, rank, 0 if args.reuse_short_slot else mb, mb, dp_ids[rank], lengths[rank],
+                local_rounds[rank] if args.local_comm_rounds else rounds,
+                int(args.local_comm_rounds), *([0]*8)), dtype=np.uint8).copy()).npu()
             source_tasks.append(SourceTask(x_cpu, mask_cpu, x, idx, weights, mask, task, torch.full_like(x, -7)))
         send_stream, recv_stream = torch.npu.Stream(), torch.npu.Stream()
         send_complete = torch.npu.Event()
@@ -502,7 +532,8 @@ def main():
             else:
                 owner.compileFFNSchedulerOnly()
                 if args.ffn_transaction:
-                    owner.compileFFNPollOnly()
+                    print('POLL_JIT ' + json.dumps({'rank': rank,
+                        'artifact': owner.compileFFNPollOnly(args.poll_cycles)}), flush=True)
                 owner.compileComputeReadyOnly()
         dist.barrier()
     torch.npu.synchronize()
@@ -532,49 +563,71 @@ def main():
         # One send stream owns the shared scratch; copy tiny statuses into preallocated
         # buffers after each Epub. No allocation or host wait goes behind a live send.
         send_status_i32 = owner.send_status.view(torch.int32)
-        with torch.npu.stream(send_stream):
-            for source_task, send_result in zip(source_tasks, send_results):
-                send_dispatch(owner, _cfg, group_name, source_task, sf, _jetty, send_status_i32)
-                send_result.copy_(owner.send_status)
-            send_complete.record(send_stream)
-        with torch.npu.stream(recv_stream):
-            if args.round_step:
-                # Initialization executes exactly once for this transaction set.
-                for source_task in source_tasks:
-                    receive(owner, _cfg, group_name, source_task, status_i32, progress, start=True)
-                deadline = time.monotonic() + args.timeout_seconds
-                while True:
-                    # Host observation is queued on recv_stream, never behind the live send.
-                    # This is deliberately bring-up code, not a graph/performance loop.
-                    progress_bytes = bytes_cpu(owner.combine_recv_progress)
-                    states = [struct.unpack_from('<4I', progress_bytes, 96*mb+64)
-                              for mb in range(args.microbatches)]
-                    if any(state == 4 for state, _, _, _ in states):
-                        raise RuntimeError(f'combineRecv round-step failed: {states}')
-                    if all(state == 3 for state, _, _, _ in states):
-                        break
-                    if time.monotonic() > deadline or sweeps >= args.max_sweeps:
-                        raise TimeoutError(f'fair return sweep did not close all slots: {states}, sweeps={sweeps}')
-                    for source_task in source_tasks:
+        task_indices = range(len(source_tasks))
+        task_groups = [(idx,) for idx in task_indices] if args.reuse_short_slot else [task_indices]
+        for indices in task_groups:
+            current_tasks = [source_tasks[idx] for idx in indices]
+            current_results = [send_results[idx] for idx in indices]
+            with torch.npu.stream(send_stream):
+                for source_task, send_result in zip(current_tasks, current_results):
+                    send_dispatch(owner, _cfg, group_name, source_task, sf, _jetty, send_status_i32)
+                    send_result.copy_(owner.send_status)
+                send_complete.record(send_stream)
+            with torch.npu.stream(recv_stream):
+                if args.round_step:
+                    # Initialization executes exactly once for this transaction set.
+                    for source_task in current_tasks:
+                        receive(owner, _cfg, group_name, source_task, status_i32, progress, start=True)
+                    deadline = time.monotonic() + args.timeout_seconds
+                    while True:
+                        # Host observation is queued on recv_stream, never behind the live send.
+                        # This is deliberately bring-up code, not a graph/performance loop.
+                        progress_bytes = bytes_cpu(owner.combine_recv_progress)
+                        states = [struct.unpack_from('<4I', progress_bytes, 96*mb+64)
+                                  for mb in range(len(current_tasks))]
+                        if any(state == 4 for state, _, _, _ in states):
+                            raise RuntimeError(f'combineRecv round-step failed: {states}')
+                        if all(state == 3 for state, _, _, _ in states):
+                            break
+                        if time.monotonic() > deadline or sweeps >= args.max_sweeps:
+                            raise TimeoutError(f'fair return sweep did not close all slots: {states}, sweeps={sweeps}')
+                        for source_task in current_tasks:
+                            receive(owner, _cfg, group_name, source_task, status_i32, progress)
+                        sweeps += 1
+                else:
+                    # The parser and device admission forbid unsafe multi-slot/multi-round use.
+                    for source_task in current_tasks:
                         receive(owner, _cfg, group_name, source_task, status_i32, progress)
-                    sweeps += 1
-            else:
-                # The parser and device admission forbid unsafe multi-slot/multi-round use.
-                for source_task in source_tasks:
-                    receive(owner, _cfg, group_name, source_task, status_i32, progress)
-                    status = owner.recv_status.cpu().tolist()
-                    assert status[:2] == [2, 0], f'combineRecv failed: {status}'
-            # The last recv-stream copy/event and Epub must both finish before Etxn reuse.
-            recv_stream.synchronize()
-        send_complete.synchronize()
+                        status = owner.recv_status.cpu().tolist()
+                        assert status[:2] == [2, 0], f'combineRecv failed: {status}'
+                # The last recv-stream copy/event and Epub must both finish before Etxn reuse.
+                recv_stream.synchronize()
+            send_complete.synchronize()
+            if args.reuse_short_slot:
+                current_mb = indices[0]
+                control_bytes = bytes_cpu(owner.control_buffer)
+                lane = next(i for i, spec in enumerate(lane_specs) if spec[0] == rank)
+                final_bit = (current_mb * local_rounds[rank] + local_rounds[rank] - 1) & 1
+                acks = [struct.unpack_from('<I', control_bytes, (lane * len(receivers) + f) * 64 + offset)[0]
+                        for f in range(len(receivers)) for offset in (0, 32)]
+                if acks != [final_bit] * (2 * len(receivers)):
+                    raise RuntimeError(f'slot reuse before final Done/Consumed rank={rank} mb={current_mb}: {acks}')
+                ledger = bytes_cpu(owner.round_ledger)
+                if any(struct.unpack_from('<I', ledger, bank * 64)[0] for bank in range(2)):
+                    raise RuntimeError(f'slot reuse with live Ledger rank={rank} mb={current_mb}')
+                print('A_SLOT_COMPLETE ' + json.dumps(dict(rank=rank, mb=current_mb, slot=0,
+                      local_rounds=local_rounds[rank], final_bit=final_bit, acks=acks)), flush=True)
         with torch.npu.stream(recv_stream):
             for mb, (source_task, result) in enumerate(zip(source_tasks, send_results)):
                 assert result.cpu().tolist()[:2] == [2, 0], f'dispatchSend failed for microbatch {mb}'
-                xf = (source_task.x_cpu * (dp_ids[rank] + 1)).to(torch.float32)
-                acc = torch.zeros_like(xf)
-                for wv in weight_vector(args.weights, k):
-                    acc = acc + xf * wv  # FP32 fold in k order, one BF16 round at the end
-                expected = acc.to(torch.bfloat16)
+                expected = torch.empty_like(source_task.x_cpu)
+                for begin in range(0, capacity, 512):
+                    end = min(begin + 512, capacity)
+                    xf = (source_task.x_cpu[begin:end] * (dp_ids[rank] + 1)).to(torch.float32)
+                    acc = torch.zeros_like(xf)
+                    for wv in weight_vector(args.weights, k):
+                        acc.add_(xf * wv)  # FP32 fold in k order, one BF16 round at the end
+                    expected[begin:end] = acc.to(torch.bfloat16)
                 expected[~source_task.mask_cpu] = 0
                 b = lengths[rank]
                 actual = source_task.output.cpu()
@@ -606,10 +659,12 @@ def main():
     elif args.ffn_transaction:
         run_transaction_ffn(
             owner, _cfg, rank=rank, lane_specs=lane_specs, layer_ids=layer_ids,
-            expected_rounds=rounds * args.microbatches * len(set(dp_ids)), timeout=args.timeout_seconds,
+            expected_rounds=expected_ffn_rounds * args.microbatches, timeout=args.timeout_seconds,
             recv=lambda: recv_dispatch(owner, _cfg, group_name, recv_sf),
             send=lambda: send_combine(owner, _cfg, group_name, _jetty),
-            grouped_gemm=args.transaction_gmm, wait_first_cohort=args.transaction_cohort)
+            grouped_gemm=args.transaction_gmm, wait_first_cohort=args.transaction_cohort,
+            local_comm_rounds=args.local_comm_rounds, poll_cycles=args.poll_cycles,
+            wait_tail_overlap=args.reuse_short_slot)
         torch.npu.synchronize()
     else:
         finished = 0
@@ -666,6 +721,15 @@ def main():
     stage('pre_function_barrier')
     dist.barrier()
     stage('post_function_barrier')
+    if args.local_comm_rounds and rank in receivers:
+        controls = bytes_cpu(owner.control_buffer)
+        terminal = [struct.unpack_from('<I', controls, lane * 128 + 96)[0]
+                    for lane in range(len(lane_specs))]
+        expected = [(local_rounds[src] * (args.microbatches if args.reuse_short_slot else 1)) & 1
+                    for src, *_ in lane_specs]
+        print('F_CREDIT_TERMINAL ' + json.dumps(dict(rank=rank, credits=terminal, expected=expected)),
+              flush=True)
+        assert terminal == expected, f'Credit parity mismatch rank={rank}: {terminal} != {expected}'
     _mem('function_done', owner)
     _stride_dir('function_done')
     if prof is not None:

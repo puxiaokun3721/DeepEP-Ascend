@@ -2,6 +2,9 @@
 #include <deep_ep/impls/afd/dispatch_recv.hpp>
 #include <deep_ep/layout/afd/scheduler.hpp>
 #include <deep_ep/layout/afd/ffn_transaction.hpp>
+#ifdef AFD_KERNEL_FFN_POLL_TU
+#include <deep_ep/impls/afd/poll_timestamp.hpp>
+#endif
 
 // ### PATCH START: AFD independent DP scheduler; native EP has no independent AF scheduler
 namespace deep_ep::afd {
@@ -81,6 +84,11 @@ __aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDFfnEn
     out[0]=v.pending_idx;out[1]=v.member_begin;out[2]=v.num_members;out[3]=v.layer_slot;
     out[4]=v.remaining_rows;out[5]=v.grant_state;out[6]=v.retired;out[7]=v.reserved;
 }
+__aicore__ inline void scheduler_store_ubuf(__ubuf__ uint8_t* dst,const AFDLocalRoundContinuation& v) {
+    auto out=reinterpret_cast<__ubuf__ uint32_t*>(dst);
+    out[0]=v.valid;out[1]=v.dp_idx;out[2]=v.phase;out[3]=v.microbatch_idx;
+    out[4]=v.layer_idx;out[5]=v.next_round;out[6]=v.end_round;out[7]=v.reserved;
+}
 template<class T> __aicore__ inline void scheduler_write(__gm__ T* dst,const T& value,__ubuf__ uint8_t* tmp) {
     scheduler_store_ubuf(tmp,value);
     recv_store(dst,tmp,sizeof(T));
@@ -89,7 +97,8 @@ __aicore__ inline bool scheduler_same(const AFDLane& a,const AFDPendingLane& p,
                                       const AFDLane& b,const AFDPendingLane& q) {
     return q.valid && a.dp_idx==b.dp_idx && a.phase==b.phase &&
         p.inbox.microbatch_idx==q.inbox.microbatch_idx && p.inbox.layer_idx==q.inbox.layer_idx &&
-        p.inbox.round_idx==q.inbox.round_idx && p.inbox.num_comm_rounds==q.inbox.num_comm_rounds;
+        p.inbox.round_idx==q.inbox.round_idx && p.inbox.reserved[0]==q.inbox.reserved[0] &&
+        (p.inbox.reserved[0]==kLocalCommRounds || p.inbox.num_comm_rounds==q.inbox.num_comm_rounds);
 }
 // AFD-only directory: slots are not members. Rebuild in two quadratic passes
 // once per invocation, rather than rediscovering representatives for every task.
@@ -126,6 +135,74 @@ __aicore__ inline void scheduler_index_members(__gm__ const AFDLane* lanes,
     AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
 }
 
+// Each live continuation is anchored to a lane with the longest local count.
+// That lane cannot start a new task until this one retires. Shorter lanes may
+// already carry different microbatches when their old DP's next round arrives.
+template<int L>
+__aicore__ inline __gm__ AFDLocalRoundContinuation* scheduler_continuation_at(
+    __gm__ uint8_t* table,uint32_t lane) {
+    return reinterpret_cast<__gm__ AFDLocalRoundContinuation*>(table + lane * scheduler_continuation_stride(L));
+}
+__aicore__ inline __gm__ uint32_t* scheduler_continuation_counts(
+    __gm__ AFDLocalRoundContinuation* entry) {
+    return reinterpret_cast<__gm__ uint32_t*>(entry + 1);
+}
+template<int L>
+__aicore__ inline __gm__ AFDLocalRoundContinuation* scheduler_find_continuation(
+    __gm__ uint8_t* table,const AFDLane& lane,const AFDInbox& inbox) {
+    for (int i=0;i<L;++i) {
+        auto item=scheduler_continuation_at<L>(table,i);
+        const auto saved=recv_read(item);
+        if (saved.valid && saved.dp_idx==lane.dp_idx && saved.phase==lane.phase &&
+            saved.microbatch_idx==inbox.microbatch_idx && saved.layer_idx==inbox.layer_idx)
+            return item;
+    }
+    return nullptr;
+}
+template<int L>
+__aicore__ inline bool scheduler_commit_local_round(
+    __gm__ uint8_t* table,__gm__ const AFDLane* lanes,__gm__ const AFDPendingLane* pending,
+    const AFDFfnEntry& entry,__gm__ const AFDActiveMember* members,__ubuf__ uint8_t* tmp) {
+    const auto representative=recv_read(pending + entry.pending_idx);
+    const auto inbox=representative.inbox;
+    const auto lane=recv_read(lanes + entry.pending_idx);
+    auto item=scheduler_find_continuation<L>(table,lane,inbox);
+    if (inbox.round_idx) {
+        if (!item) return false;
+        auto saved=recv_read(item);
+        if (saved.next_round!=inbox.round_idx || saved.next_round>=saved.end_round) return false;
+        ++saved.next_round;
+        if (saved.next_round==saved.end_round) saved={};
+        scheduler_write(item,saved,tmp);
+        return true;
+    }
+    if (item) return false;
+    uint32_t anchor=entry.pending_idx, end_round=1;
+    for (uint32_t j=0;j<entry.num_members;++j) {
+        const auto source_lane=recv_read(members+entry.member_begin+j).source_lane_idx;
+        const auto rounds=recv_read(pending+source_lane).inbox.num_comm_rounds;
+        if (rounds>end_round) {
+            anchor=source_lane;
+            end_round=rounds;
+        }
+    }
+    if (end_round==1) return true;
+    item=scheduler_continuation_at<L>(table,anchor);
+    if (recv_read(item).valid) return false;
+    auto counts=scheduler_continuation_counts(item);
+    for (int i=0;i<L;++i) AscendC::WriteGmByPassDCache(counts+i,uint32_t(0));
+    for (uint32_t j=0;j<entry.num_members;++j) {
+        const auto source_lane=recv_read(members+entry.member_begin+j).source_lane_idx;
+        const auto rounds=recv_read(pending+source_lane).inbox.num_comm_rounds;
+        AscendC::WriteGmByPassDCache(counts+source_lane,rounds);
+    }
+    AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
+    const AFDLocalRoundContinuation saved{
+        1,lane.dp_idx,lane.phase,inbox.microbatch_idx,inbox.layer_idx,1,end_round,0};
+    scheduler_write(item,saved,tmp);
+    return true;
+}
+
 // Count matching distinct physical members in one lane scan. Every matched lane
 // belongs to the registered group, so equal cardinality + uniqueness proves
 // exact membership (including zero-route members and inactive sibling slots).
@@ -133,20 +210,48 @@ __aicore__ inline void scheduler_index_members(__gm__ const AFDLane* lanes,
 template<int L,bool PRECHECK>
 __aicore__ inline bool scheduler_ready(int leader,__gm__ const AFDLane* lanes,
     __gm__ AFDPendingLane* pending,__gm__ const AFDReturnLane* returns,
-    __gm__ const uint8_t* control,__ubuf__ uint8_t* tmp,uint32_t& error) {
+    __gm__ const uint8_t* control,__gm__ uint8_t* continuations,
+    __ubuf__ uint8_t* tmp,uint32_t& error) {
     auto a=recv_read(lanes+leader);auto p=recv_read(pending+leader);
     if(!p.valid) return false;
     for(int i=0;i<leader;++i)
         if(scheduler_same(a,p,recv_read(lanes+i),recv_read(pending+i))) return false;
+    uint32_t expected=p.num_group_members;
+    __gm__ const uint32_t* local_totals=nullptr;
+    if (continuations) {
+        const auto item=scheduler_find_continuation<L>(continuations,a,p.inbox);
+        const uint32_t round=p.inbox.round_idx;
+        if (round) {
+            if (!item || recv_read(item).next_round!=round) {
+                error=STATE_ORDER;
+                return false;
+            }
+            local_totals=scheduler_continuation_counts(item);
+            expected=0;
+            for (int j=0;j<L;++j) expected+=recv_read(local_totals+j)>round;
+            if (!expected) {
+                error=STATE_ORDER;
+                return false;
+            }
+        } else if (item) {
+            // The same logical key cannot open again during an older continuation.
+            error=STATE_ORDER;
+            return false;
+        }
+    }
     bool has_routes=false;
     uint32_t matches=0;
     for(int j=0;j<L;++j) {
         auto b=recv_read(lanes+j);auto q=recv_read(pending+j);
         if(!scheduler_same(a,p,b,q))continue;
+        if (local_totals && recv_read(local_totals+j)!=q.inbox.num_comm_rounds) {
+            error=STATE_ORDER;
+            return false;
+        }
         ++matches;
         has_routes|=q.num_remaining_routes!=0;
     }
-    if(matches!=p.num_group_members || error!=OK) return false;
+    if(matches!=expected || error!=OK) return false;
     // AFD CONTROL has no useful compute to overlap. A missing credit must not
     // pin the single Active/workspace, even under COMPUTE_AHEAD. A member with
     // zero routes in a nonempty DP entry is not a separate CONTROL entry.
@@ -167,6 +272,7 @@ __aicore__ inline bool scheduler_ready(int leader,__gm__ const AFDLane* lanes,
 template<int L,int R,int NL>
 __aicore__ inline bool scheduler_retire_transaction(const AFDFfnTransaction& tx,
     __gm__ uint8_t* active_base,__gm__ AFDPendingLane* pending,
+    __gm__ const AFDLane* lanes,__gm__ uint8_t* continuations,
     __gm__ const uint32_t* layers,__ubuf__ uint8_t* tmp) {
     if(!tx.num_entries || tx.num_entries>L || tx.num_members>L ||
        tx.completed_entries!=tx.num_entries || tx.next_group!=uint32_t(NL*R))
@@ -200,6 +306,14 @@ __aicore__ inline bool scheduler_retire_transaction(const AFDFfnTransaction& tx,
         if(!saw_representative) return false;
     }
     if(next_member!=tx.num_members) return false;
+    if (continuations) {
+        // Read only frozen Pending snapshots. CS has completed and drained its ACKs.
+        for (uint32_t i=0;i<tx.num_entries;++i) {
+            if (!scheduler_commit_local_round<L>(continuations,lanes,pending,recv_read(entries+i),members,tmp))
+                return false;
+        }
+        AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
+    }
     // CS already retired these windows. Never read the old Inbox: the sender
     // may have published another round in a retired lane before this launch.
     for(uint32_t j=0;j<next_member;++j) {
@@ -216,7 +330,7 @@ __aicore__ inline uint32_t scheduler_freeze_transaction(int first,uint32_t phase
     __gm__ const AFDLane* lanes,__gm__ AFDPendingLane* pending,
     __gm__ const AFDReturnLane* returns,__gm__ const uint8_t* control,
     __gm__ const uint32_t* layers,__gm__ const uint32_t* totals,
-    __gm__ uint8_t* active_base,AFDFfnTransaction& tx,
+    __gm__ uint8_t* active_base,AFDFfnTransaction& tx,__gm__ uint8_t* continuations,
     __ubuf__ uint8_t* tmp,__ubuf__ uint32_t* counts) {
     auto entries=reinterpret_cast<__gm__ AFDFfnEntry*>(active_base+ffn_entries_offset(L,R));
     auto members=reinterpret_cast<__gm__ AFDActiveMember*>(active_base+ffn_members_offset(L,R));
@@ -231,7 +345,7 @@ __aicore__ inline uint32_t scheduler_freeze_transaction(int first,uint32_t phase
         const auto p=recv_read(pending+i);
         const auto lane=recv_read(lanes+i);
         if(!p.valid || lane.phase!=phase ||
-           !scheduler_ready<L,PRECHECK>(i,lanes,pending,returns,control,tmp,error))
+           !scheduler_ready<L,PRECHECK>(i,lanes,pending,returns,control,continuations,tmp,error))
             continue;
         uint32_t layer_slot=0;
         while(layer_slot<NL && recv_read(layers+layer_slot)!=p.inbox.layer_idx)++layer_slot;
@@ -253,6 +367,10 @@ __aicore__ inline uint32_t scheduler_freeze_transaction(int first,uint32_t phase
             member.delta_begin=tx.num_members*R;
             member.num_experts=R;
             member.reserved[0]=layer_slot;
+            if (continuations) {
+                member.reserved[1]=q.inbox.round_idx;
+                member.reserved[2]=q.inbox.num_comm_rounds;
+            }
             scheduler_write(members+tx.num_members,member,tmp);
             recv_load(reinterpret_cast<__ubuf__ uint8_t*>(counts),totals+uint64_t(j)*R,4*R);
             recv_store(snapshot_counts+uint64_t(tx.num_members)*R,
@@ -304,13 +422,18 @@ __global__ __vector__ void ffn_scheduler_impl(
     auto exec=recv_read(execution_state);
     uint32_t error=OK;
     if(context->abi_version!=kAbiVersion || context->num_source_lanes!=L || context->num_ranks!=N ||
-       context->num_experts!=E || context->num_layers!=NL || context->num_topk!=K || rank_idx<0 || rank_idx>=N)
+       context->num_experts!=E || context->num_layers!=NL || context->num_topk!=K || rank_idx<0 || rank_idx>=N ||
+       context->comm_round_mode>kLocalCommRounds || (!TXN && context->comm_round_mode!=kSharedCommRounds))
         error=BAD_ABI;
     auto active_base=reinterpret_cast<__gm__ uint8_t*>(active);
     auto txn_addr=reinterpret_cast<__gm__ AFDFfnTransaction*>(active_base+ffn_tx_offset(L,R));
     auto layers=reinterpret_cast<__gm__ const uint32_t*>(base+context->layers_offset);
     AFDFfnTransaction tx{};
+    auto lanes=reinterpret_cast<__gm__ const AFDLane*>(base+context->lanes_offset);
+    __gm__ uint8_t* continuations=nullptr;
     if constexpr(TXN) {
+        if (context->comm_round_mode==kLocalCommRounds)
+            continuations=ws+scheduler_workspace_bytes(L,R);
         static_assert(uint64_t(NL)*R<=INT32_MAX);
         const auto previous=recv_read(active);
         if(previous.reserved!=kFfnTransactionMagic || previous.layer_idx!=kFfnMixedLayer ||
@@ -323,7 +446,7 @@ __global__ __vector__ void ffn_scheduler_impl(
             if(error==OK && (tx.state==kFfnSelected || tx.state==kFfnSlice))
                 return;
             if(error==OK && tx.state==kFfnComplete &&
-               (exec.stage!=COMMITTED || !scheduler_retire_transaction<L,R,NL>(tx,active_base,pending,layers,tmp)))
+               (exec.stage!=COMMITTED || !scheduler_retire_transaction<L,R,NL>(tx,active_base,pending,lanes,continuations,layers,tmp)))
                 error=STATE_ORDER;
             if(error==OK && tx.state!=kFfnIdle && tx.state!=kFfnComplete)
                 error=STATE_ORDER;
@@ -409,7 +532,6 @@ __global__ __vector__ void ffn_scheduler_impl(
     auto grants=reinterpret_cast<__gm__ uint32_t*>(reinterpret_cast<__gm__ uint8_t*>(execution_state)+32);
     for(int e=0;e<R;++e) rows[e]=prefix[e]=0;
     // Context directory is constructed and bounds checked by the host, static across replay.
-    auto lanes=reinterpret_cast<__gm__ const AFDLane*>(base+context->lanes_offset);
     auto addresses=reinterpret_cast<__gm__ const AFDAddress*>(base+context->addresses_offset);
     AFDReturnDirectory directory{};
     if(error==OK && !recv_range(context->reserved_address,sizeof(AFDReturnDirectory),context->context_bytes)) error=BAD_ABI;
@@ -434,7 +556,8 @@ __global__ __vector__ void ffn_scheduler_impl(
         auto lane=recv_read(lanes+i);
         recv_load(tmp,control+address.inbox_offset,64);
         p.inbox=recv_read_inbox_ubuf(tmp);
-        if(!p.inbox.num_comm_rounds || p.inbox.round_idx>=p.inbox.num_comm_rounds || p.inbox.return_bit>1 ||
+        if(!p.inbox.num_comm_rounds || p.inbox.reserved[0]!=context->comm_round_mode ||
+           p.inbox.round_idx>=p.inbox.num_comm_rounds || p.inbox.return_bit>1 ||
            p.inbox.num_round_tokens>lane.capacity || p.inbox.num_recv_records>p.inbox.num_round_tokens) {error=BAD_TASK;break;}
         bool layer_ok=false;
         for(int t=0;t<NL;++t) if(recv_read(layers+t)==p.inbox.layer_idx) layer_ok=true;
@@ -456,7 +579,7 @@ __global__ __vector__ void ffn_scheduler_impl(
     // Phase fairness: choose oldest ready alternative phase after every committed selection.
     int first=-1;uint64_t oldest=~uint64_t(0);bool alternative=false;
     for(int i=0;i<L && error==OK;++i) {
-        if(!scheduler_ready<L,PRECHECK>(i,lanes,pending,returns,control,tmp,error)) continue;
+        if(!scheduler_ready<L,PRECHECK>(i,lanes,pending,returns,control,continuations,tmp,error)) continue;
         auto p=recv_read(pending+i);auto lane=recv_read(lanes+i);
         for(int j=0;j<L;++j) {auto q=recv_read(pending+j);if(scheduler_same(lane,p,recv_read(lanes+j),q) && q.first_seen<p.first_seen) p.first_seen=q.first_seen;}
         bool alt=state.has_phase && lane.phase!=state.last_phase;
@@ -478,7 +601,7 @@ __global__ __vector__ void ffn_scheduler_impl(
                 error=STATE_ORDER;
             } else {
                 error=scheduler_freeze_transaction<L,R,NL,Q,QA,A,PRECHECK>(
-                    first,out.phase,lanes,pending,returns,control,layers,totals,active_base,tx,tmp,counts);
+                    first,out.phase,lanes,pending,returns,control,layers,totals,active_base,tx,continuations,tmp,counts);
                 if(error==OK && tx.num_entries) {
                     ++tx.txn_id;
                     tx.state=kFfnSelected;
@@ -512,7 +635,7 @@ __global__ __vector__ void ffn_scheduler_impl(
             int i=(first+step)%L;
             auto p=recv_read(pending+i);auto lane=recv_read(lanes+i);
             if(!p.valid || lane.phase!=out.phase || p.inbox.layer_idx!=out.layer_idx ||
-               !scheduler_ready<L,PRECHECK>(i,lanes,pending,returns,control,tmp,error)) continue;
+               !scheduler_ready<L,PRECHECK>(i,lanes,pending,returns,control,continuations,tmp,error)) continue;
             AFDActiveEntry ent{};ent.pending_idx=i;ent.member_begin=out.num_members;ent.segment_begin=out.num_segments;ent.is_final=1;
             ent.grant_state=PRECHECK?HELD:p.grant_state;
             for(int j=0;j<L;++j) {
@@ -567,12 +690,10 @@ __global__ __vector__ void ffn_scheduler_impl(
 
 #ifdef AFD_KERNEL_FFN_POLL_TU
 template<int N,int R,int L>
-__global__ __vector__ void ffn_poll_impl(
+__aicore__ inline void ffn_poll_body(
     __gm__ const AFDContextLayout* context,__gm__ const void* control_buffer,
     __gm__ const void* workspace,__gm__ const AFDActive* active,
-    __gm__ uint32_t* report,const int rank_idx) {
-    AscendC::InitSocState();
-    if(AscendC::GetBlockIdx()!=0) return;
+    __gm__ uint32_t* report,const int rank_idx,__gm__ AFDPollTimestamp* timestamps) {
     auto tmp=reinterpret_cast<__ubuf__ uint8_t*>(0);
     auto words=reinterpret_cast<__ubuf__ uint32_t*>(tmp);
     auto base=reinterpret_cast<__gm__ const uint8_t*>(context);
@@ -619,11 +740,41 @@ __global__ __vector__ void ffn_poll_impl(
                 recv_load(tmp,control+address.input_ready_offset,32);
                 observed=words[0];
                 classification=has_pending?kPending:(observed==expected?kNewReady:kNoReady);
+                if (timestamps != nullptr && classification == kNewReady) {
+                    capture_ffn_poll_timestamp(timestamps + i, control, address, context->control_bytes,
+                        observed, p.first_seen, tmp);
+                }
             }
         }
         words[0]=classification;words[1]=observed;words[2]=expected;words[3]=phase;
         recv_store(report+uint64_t(i)*4,tmp,16);
     }
+}
+
+template<int N,int R,int L>
+__global__ __vector__ void ffn_poll_impl(
+    __gm__ const AFDContextLayout *context, __gm__ const void *control,
+    __gm__ const void *workspace, __gm__ const AFDActive *active,
+    __gm__ uint32_t *report, int rank_idx)
+{
+    AscendC::InitSocState();
+    if (AscendC::GetBlockIdx() != 0) {
+        return;
+    }
+    ffn_poll_body<N,R,L>(context, control, workspace, active, report, rank_idx, nullptr);
+}
+
+template<int N,int R,int L>
+__global__ __vector__ void ffn_poll_timestamp_impl(
+    __gm__ const AFDContextLayout *context, __gm__ const void *control,
+    __gm__ const void *workspace, __gm__ const AFDActive *active,
+    __gm__ uint32_t *report, __gm__ AFDPollTimestamp *timestamps, int rank_idx)
+{
+    AscendC::InitSocState();
+    if (AscendC::GetBlockIdx() != 0) {
+        return;
+    }
+    ffn_poll_body<N,R,L>(context, control, workspace, active, report, rank_idx, timestamps);
 }
 #endif
 

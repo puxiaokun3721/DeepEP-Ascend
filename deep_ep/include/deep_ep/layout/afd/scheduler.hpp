@@ -19,6 +19,18 @@ constexpr __aicore__ __forceinline__ uint64_t scheduler_pending_offset() { retur
 constexpr __aicore__ __forceinline__ uint64_t scheduler_counts_offset(uint32_t l) { return 32+96*uint64_t(l); }
 constexpr __aicore__ __forceinline__ uint64_t scheduler_consumed_offset(uint32_t l,uint32_t r) { return scheduler_counts_offset(l)+align32(4*uint64_t(l)*r); }
 constexpr __aicore__ __forceinline__ uint64_t scheduler_workspace_bytes(uint32_t l,uint32_t r) { return scheduler_consumed_offset(l,r)+align32(4*uint64_t(l)*r); }
+// Continuations are F-local and outlive a selected compute transaction.
+struct alignas(32) AFDLocalRoundContinuation {
+    uint32_t valid, dp_idx, phase, microbatch_idx;
+    uint32_t layer_idx, next_round, end_round, reserved;
+};
+static_assert(sizeof(AFDLocalRoundContinuation) == 32);
+constexpr __aicore__ __forceinline__ uint64_t scheduler_continuation_stride(uint32_t lanes) {
+    return sizeof(AFDLocalRoundContinuation) + align32(4 * uint64_t(lanes));
+}
+constexpr __aicore__ __forceinline__ uint64_t scheduler_local_round_workspace_bytes(uint32_t lanes, uint32_t experts) {
+    return scheduler_workspace_bytes(lanes, experts) + lanes * scheduler_continuation_stride(lanes);
+}
 constexpr __aicore__ __forceinline__ uint64_t scheduler_ub_bytes(uint32_t r) { return 256+5*align32(4*uint64_t(r)); }
 static_assert(offsetof(AFDPendingLane,inbox)==32);
 static_assert(sizeof(AFDSchedulerState)==32 && sizeof(AFDPendingLane)==96);

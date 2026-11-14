@@ -57,7 +57,8 @@ __global__ __vector__ void combine_send_impl(
         else if(state.error_code!=OK || state.num_entries!=task.num_entries ||
             state.stage!=(task.kind==WORK?COMPUTE_READY:INPUT_READY) || (done.state!=ARMED || done.error_code!=OK || done.num_entries!=task.num_entries ||
             done.num_members!=task.num_members || done.num_deltas!=uint64_t(task.num_members)*R))error=STATE_ORDER;
-        if(context->abi_version!=kAbiVersion || context->num_src_ranks!=NA || context->num_ranks!=N ||
+        if(context->abi_version!=kAbiVersion || context->comm_round_mode!=kSharedCommRounds ||
+           context->num_src_ranks!=NA || context->num_ranks!=N ||
            context->num_source_lanes!=L || context->num_experts!=N*R || context->num_topk!=K ||
            context->num_vec_cores!=NC || context->num_layers!=NL || rank_idx<0 || rank_idx>=N)error=BAD_ABI;
         if(task.num_entries==0 || task.num_entries>L || task.num_members>L || task.num_segments>uint64_t(L)*R ||

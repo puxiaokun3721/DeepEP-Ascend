@@ -1,6 +1,7 @@
 #pragma once
 #include <format>
 #include <deep_ep/layout/afd/context.hpp>
+#include <deep_ep/layout/afd/poll_timestamp.hpp>
 #include "../../runtime/jit.hpp"
 
 // ### PATCH START: remaining AFD launchers, native EP DeepJIT conventions
@@ -23,23 +24,32 @@ static void launch_ffn_scheduler(void* buffer,void* context,void* control,void* 
     jit->launch(kernel,{.num_blocks=1,.num_ubuf_bytes=ub},buffer,context,control,workspace,
         active,execution,completion,psum,counts,rank);
 }
-static std::string ffn_poll_source(const AFDContextLayout& c) {
+static std::string ffn_poll_source(const AFDContextLayout& c, bool timestamp = false) {
     return std::format(R"(
 #define AFD_KERNEL_FFN_POLL_TU
 #include <deep_ep/impls/afd/ffn_scheduler.hpp>
 using namespace deep_ep::afd;
 static void __instantiate_kernel() {{
- auto ptr=reinterpret_cast<void*>(&ffn_poll_impl<{},{},{}>);
+ auto ptr=reinterpret_cast<void*>(&{}<{},{},{}>);
 }}
-)",c.num_ranks,c.num_experts/c.num_ranks,c.num_source_lanes);
+)", timestamp ? "ffn_poll_timestamp_impl" : "ffn_poll_impl",
+    c.num_ranks,c.num_experts/c.num_ranks,c.num_source_lanes);
 }
 static void launch_ffn_poll(void* context,void* control,void* workspace,void* active,void* report,
                            const AFDContextLayout& c,int rank,int ub) {
     const auto kernel=jit->compile("afd_ffn_poll",ffn_poll_source(c));
     jit->launch(kernel,{.num_blocks=1,.num_ubuf_bytes=ub},context,control,workspace,active,report,rank);
 }
-static std::string compile_ffn_poll_only(const AFDContextLayout& c) {
-    return jit->compile_without_load("afd_ffn_poll",ffn_poll_source(c)).string();
+static void launch_ffn_poll_timestamp(void *context, void *control, void *workspace, void *active,
+    void *report, void *timestamps, const AFDContextLayout &config, int rank, int ub)
+{
+    const auto kernel = jit->compile("afd_ffn_poll_timestamp", ffn_poll_source(config, true));
+    jit->launch(kernel, {.num_blocks=1, .num_ubuf_bytes=ub}, context, control, workspace, active,
+        report, timestamps, rank);
+}
+static std::string compile_ffn_poll_only(const AFDContextLayout& config, bool timestamp) {
+    return jit->compile_without_load(timestamp ? "afd_ffn_poll_timestamp" : "afd_ffn_poll",
+        ffn_poll_source(config, timestamp)).string();
 }
 static void launch_compute_ready(void* active,void* execution,int ub) {
     const auto kernel=jit->compile("afd_compute_ready",R"(

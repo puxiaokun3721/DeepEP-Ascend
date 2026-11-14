@@ -300,12 +300,18 @@ __global__ __vector__ void dispatch_impl(
     if(vec_core_idx==0) {
         uint32_t code=OK;
         if(context->abi_version!=kAbiVersion || task_info->abi_version!=kAbiVersion ||
-            context->return_progress_mode>RETURN_ROUND_STEP) code=BAD_ABI;
+            context->return_progress_mode>RETURN_ROUND_STEP || context->comm_round_mode>kLocalCommRounds ||
+            task_info->reserved[0]!=context->comm_round_mode) code=BAD_ABI;
         else if(lane_idx==context->num_source_lanes || task_info->src_rank_idx!=context->src_rank_idx ||
             task_info->num_tokens>context->num_token_capacity || task_info->num_comm_rounds==0) code=BAD_TASK;
         else {
             const uint32_t c=lanes[lane_idx].capacity;
-            if(task_info->num_comm_rounds<(uint64_t(task_info->num_tokens)+c-1)/c) code=BAD_TASK;
+            const uint64_t minimum = c ? (uint64_t(task_info->num_tokens) + c - 1) / c : 0;
+            const uint64_t local = minimum ? minimum : 1;
+            if (!c || task_info->num_comm_rounds < minimum ||
+                (context->comm_round_mode == kLocalCommRounds && task_info->num_comm_rounds != local)) {
+                code=BAD_TASK;
+            }
             // [AFD] A blocking per-transaction recv cannot fairly release other slots.
             // Reject the unsafe family before any payload, Inbox or Ready publication.
             uint32_t num_local_lanes=0;
@@ -546,6 +552,7 @@ __global__ __vector__ void dispatch_impl(
                 auto inbox=reinterpret_cast<__ubuf__ AFDInbox*>(stage);
                 inbox->microbatch_idx=task_info->microbatch_idx;inbox->layer_idx=task_info->layer_idx;
                 inbox->round_idx=round;inbox->num_comm_rounds=task_info->num_comm_rounds;
+                inbox->reserved[0]=context->comm_round_mode;
                 inbox->num_round_tokens=length;inbox->return_bit=saved.next_return_bit;
                 inbox->num_recv_records=AscendC::ReadGmByPassDCache(rtotals+f);
                 store_control(reinterpret_cast<__gm__ void*>(peers[f].control_base+addresses[lane_idx*kNumRanks+f].inbox_offset),stage,64);

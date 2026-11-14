@@ -46,6 +46,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_property_readonly("payload",&AFDBuffer::payload)
         // CAM test wiring: launch parameters as attrs and the device jetty table.
         .def("camConfig",&AFDBuffer::cam_config)
+        .def("enable_local_rounds",&AFDBuffer::enable_local_rounds)
         .def_property_readonly("jetty_ptrs",&AFDBuffer::jetty_ptrs)
         .def("memory_usage",&AFDBuffer::memory_usage)
         .def("destroy",&AFDBuffer::destroy)
@@ -75,7 +76,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_property_readonly("combine_recv_progress",&AFDBuffer::combine_recv_progress)
         .def("ffnScheduler",&AFDBuffer::ffnScheduler)
         .def("ffnPoll",&AFDBuffer::ffnPoll)
-        .def("compileFFNPollOnly",&AFDBuffer::compileFFNPollOnly)
+        .def("ffnPollTimestamp",&AFDBuffer::ffnPollTimestamp,py::arg("timestamps"))
+        .def("compileFFNPollOnly", &AFDBuffer::compileFFNPollOnly, py::arg("timestamp") = false)
         .def("computeReady",&AFDBuffer::computeReady)
         .def("probeQueueMeta",&AFDBuffer::probeQueueMeta)
         .def("compileQueueMetaProbeOnly",&AFDBuffer::compileQueueMetaProbeOnly)
